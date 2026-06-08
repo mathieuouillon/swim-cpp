@@ -1,0 +1,22 @@
+# Meson/Ninja build output
+/build/
+/builddir/
+build*/
+
+# Large data files and analysis outputs (never commit)
+*.hipo
+*.root
+*.dat
+*.evio
+
+# Meson subprojects: keep the .wrap files, ignore downloaded sources + cache
+/subprojects/*/
+/subprojects/packagecache/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*~
+
+# Local Claude Code tooling config
+/.claude/

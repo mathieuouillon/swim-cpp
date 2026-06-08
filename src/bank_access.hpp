@@ -1,0 +1,185 @@
+// Per-detector response-bank readers over a `const hipo::bank*` (nullptr = the
+// bank is absent in this run, the C++ analog of Rust's `Option<&Bank>`). Banks
+// may have several rows per particle, so rows are selected by `pindex` plus an
+// optional `detector` and/or `layer`. Port of the helpers in analysis.rs.
+//
+// Column reads use hipo::bank::getInt (promotes Byte/Short/Int) and getDouble
+// (handles Float and Double) — matching the Rust RowView i32()/f64() getters
+// that convert across the stored wire width.
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <limits>
+#include <optional>
+
+#include "constants.hpp"
+#include "hipo4/bank.h"
+
+namespace vz {
+
+inline constexpr double DNAN = std::numeric_limits<double>::quiet_NaN();
+
+/// Row index of the first row matching `pindex` (and `det`/`layer` when given).
+inline std::optional<int> match_row(const hipo::bank* bank, int pindex, std::optional<int> det,
+                                    std::optional<int> layer) {
+    if (!bank) return std::nullopt;
+    const int n = bank->getRows();
+    for (int k = 0; k < n; ++k) {
+        if (bank->getInt("pindex", k) != pindex) continue;
+        if (det && bank->getInt("detector", k) != *det) continue;
+        if (layer && bank->getInt("layer", k) != *layer) continue;
+        return k;
+    }
+    return std::nullopt;
+}
+
+/// Float column from the first row matching `pindex` (+ optional `det`).
+inline std::optional<double> first_f64(const hipo::bank* bank, int pindex, std::optional<int> det,
+                                       const char* col) {
+    if (!bank) return std::nullopt;
+    auto k = match_row(bank, pindex, det, std::nullopt);
+    if (!k) return std::nullopt;
+    return bank->getDouble(col, *k);
+}
+
+/// Float column at a specific `det` + `layer` for `pindex`.
+inline std::optional<double> layer_f64(const hipo::bank* bank, int pindex, int det, int layer,
+                                       const char* col) {
+    if (!bank) return std::nullopt;
+    auto k = match_row(bank, pindex, det, layer);
+    if (!k) return std::nullopt;
+    return bank->getDouble(col, *k);
+}
+
+/// Sum of a float column over all rows matching `pindex` (+ optional `det`);
+/// nullopt if no row matched (distinguishes "absent" from "zero deposit").
+inline std::optional<double> sum_f64(const hipo::bank* bank, int pindex, std::optional<int> det,
+                                     const char* col) {
+    if (!bank) return std::nullopt;
+    double sum = 0.0;
+    bool found = false;
+    const int n = bank->getRows();
+    for (int k = 0; k < n; ++k) {
+        if (bank->getInt("pindex", k) != pindex) continue;
+        if (det && bank->getInt("detector", k) != *det) continue;
+        sum += bank->getDouble(col, k);
+        found = true;
+    }
+    if (!found) return std::nullopt;
+    return sum;
+}
+
+/// Covariance-derived resolutions from REC::CovMat (5x5 DC Kalman state x,y,tx,
+/// ty,q/p at the last superlayer): (sigma_p/p, sigma(tx), sigma(ty),
+/// sigma_theta [mrad], sigma_phi [mrad]). sigma_theta/phi propagate the slope
+/// covariance through the (theta,phi) Jacobian at the lab direction.
+struct CovRes {
+    double sigp;
+    double sigtx;
+    double sigty;
+    double sigtheta;
+    double sigphi;
+};
+
+inline CovRes covariance_resolutions(const hipo::bank* cov, int pindex, double p, double px,
+                                     double py, double pz) {
+    const double nan = DNAN;
+    auto c33o = first_f64(cov, pindex, std::nullopt, "C33");
+    auto c44o = first_f64(cov, pindex, std::nullopt, "C44");
+    auto c34o = first_f64(cov, pindex, std::nullopt, "C34");
+    auto c55o = first_f64(cov, pindex, std::nullopt, "C55");
+
+    double sigp = c55o ? p * std::sqrt(std::max(0.0, *c55o)) : nan;
+    double sigtx = c33o ? std::sqrt(std::max(0.0, *c33o)) : nan;
+    double sigty = c44o ? std::sqrt(std::max(0.0, *c44o)) : nan;
+    double sigtheta = nan;
+    double sigphi = nan;
+
+    if (c33o && c44o && c34o && pz > 0.0) {
+        const double c33 = *c33o, c44 = *c44o, c34 = *c34o;
+        const double a = px / pz;
+        const double b = py / pz;
+        const double rho2 = a * a + b * b;
+        if (rho2 > 1e-9) {
+            const double rho = std::sqrt(rho2);
+            // theta = atan(rho), phi = atan2(b, a)
+            const double dth_da = a / (rho * (1.0 + rho2));
+            const double dth_db = b / (rho * (1.0 + rho2));
+            const double dph_da = -b / rho2;
+            const double dph_db = a / rho2;
+            const double var_th =
+                dth_da * dth_da * c33 + dth_db * dth_db * c44 + 2.0 * dth_da * dth_db * c34;
+            const double var_ph =
+                dph_da * dph_da * c33 + dph_db * dph_db * c44 + 2.0 * dph_da * dph_db * c34;
+            sigtheta = std::sqrt(std::max(0.0, var_th)) * 1000.0;  // mrad
+            sigphi = std::sqrt(std::max(0.0, var_ph)) * 1000.0;    // mrad
+        }
+    }
+    return {sigp, sigtx, sigty, sigtheta, sigphi};
+}
+
+struct PosMom {
+    std::array<double, 3> pos;  // cm
+    std::array<double, 3> mom;  // GeV
+};
+
+/// True (position [cm], momentum [GeV]) of the primary `target_pid` at its first
+/// DC hit (detector==DC, mpid==0, lowest avgT). MC::True positions avgX/Y/Z are
+/// mm -> /10 cm, momenta MeV -> /1000 GeV.
+inline std::optional<PosMom> mc_true_dc_state(const hipo::bank* mctrue, int target_pid) {
+    if (!mctrue) return std::nullopt;
+    double best_t = std::numeric_limits<double>::infinity();
+    std::optional<PosMom> best;
+    const int n = mctrue->getRows();
+    for (int k = 0; k < n; ++k) {
+        if (mctrue->getInt("detector", k) != DET_DC) continue;
+        if (mctrue->getInt("mpid", k) != 0) continue;
+        if (mctrue->getInt("pid", k) != target_pid) continue;
+        const double t = mctrue->getDouble("avgT", k);
+        if (t < best_t) {
+            best_t = t;
+            PosMom pm;
+            pm.pos = {mctrue->getDouble("avgX", k) / 10.0, mctrue->getDouble("avgY", k) / 10.0,
+                      mctrue->getDouble("avgZ", k) / 10.0};
+            pm.mom = {mctrue->getDouble("px", k) / 1000.0, mctrue->getDouble("py", k) / 1000.0,
+                      mctrue->getDouble("pz", k) / 1000.0};
+            best = pm;
+        }
+    }
+    return best;
+}
+
+/// Reconstructed (position [cm], momentum [GeV]) at DC region 1 from REC::Traj:
+/// the row with detector==DC, layer==DC_LAYERS[0]. Position is already cm; the
+/// momentum is the (cx,cy,cz) cosines scaled by the reconstructed |p|.
+inline std::optional<PosMom> rec_traj_dc_state(const hipo::bank* traj, int pindex, double p) {
+    if (!traj) return std::nullopt;
+    auto k = match_row(traj, pindex, DET_DC, DC_LAYERS[0]);
+    if (!k) return std::nullopt;
+    PosMom pm;
+    pm.pos = {traj->getDouble("x", *k), traj->getDouble("y", *k), traj->getDouble("z", *k)};
+    const double cx = traj->getDouble("cx", *k);
+    const double cy = traj->getDouble("cy", *k);
+    const double cz = traj->getDouble("cz", *k);
+    pm.mom = {p * cx, p * cy, p * cz};
+    return pm;
+}
+
+struct PBin {
+    double lo;
+    double hi;
+    int lo10;
+    int hi10;
+};
+
+/// Momentum-bin edges and the `pNN_NN` label fragment (tenths of a GeV).
+inline PBin pbin(std::size_t b) {
+    const double lo = MOM_MIN + static_cast<double>(b) * MOM_WIDTH;
+    const double hi = lo + MOM_WIDTH;
+    return {lo, hi, static_cast<int>(std::lround(lo * 10.0)), static_cast<int>(std::lround(hi * 10.0))};
+}
+
+}  // namespace vz
