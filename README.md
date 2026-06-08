@@ -72,7 +72,24 @@ login node). The macOS-only Homebrew paths in `meson.build` are guarded behind a
 `@listfile.txt` holds one path per line (`#` comments and blank lines ignored).
 The ~1 GB torus map is loaded once and shared read-only across worker threads.
 
-The output ROOT file is compatible with the Rust analysis's `plot_vz.py`.
+## Plotting
+
+`plot_vz.py` renders the diagnostic figures from `vz.root` (its histogram-key
+conventions match this analysis's output exactly). It writes a set of PDFs:
+confusion matrix, v_z truth×reco grids (integrated + per momentum bin), Δv_z vs
+p, v_z–θ 2D, track-variable grid, the per-momentum resolution matrices
+(σtx/σty/σθ), the true vertex→DC-R1 momentum-loss set, and the swim comparisons
+(`swum_minus_rec`, `rec_vs_swum`, `swim_resolution`, `recoswum_minus_rec`, …).
+
+```sh
+pip install -r requirements.txt   # uproot, numpy, matplotlib, mplhep (+ optional scienceplots, tqdm)
+python plot_vz.py vz.root
+```
+
+It degrades gracefully without `scienceplots`/LaTeX (uses matplotlib mathtext).
+The generator-thrown spectrum in `gen_vs_reco_p` reads single-pion `.lund` files
+from `LUND_DIR` (hardcoded near the top of the script); if that directory is
+absent the thrown curve is simply skipped.
 
 ## Layout
 
@@ -84,3 +101,4 @@ The output ROOT file is compatible with the Rust analysis's `plot_vz.py`.
 - `src/accumulator_registry.hpp` — thread-local Analysis registry + merge
 - `src/main.cpp` — CLI, input expansion, field load, `chain::process`, summary
 - `test/` — swimmer straight-line test + field-map load test
+- `plot_vz.py` — matplotlib/uproot plotter for the output histograms

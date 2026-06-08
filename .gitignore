@@ -8,10 +8,15 @@ build*/
 *.root
 *.dat
 *.evio
+*.pdf
 
 # Meson subprojects: keep the .wrap files, ignore downloaded sources + cache
 /subprojects/*/
 /subprojects/packagecache/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
 
 # Editor / OS cruft
 .DS_Store

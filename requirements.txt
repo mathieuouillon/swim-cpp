@@ -1,0 +1,9 @@
+# Python dependencies for plot_vz.py (the diagnostic plotter for vz.root).
+#   pip install -r requirements.txt
+uproot
+numpy
+matplotlib
+mplhep>=1.2.0
+# Optional: nicer style (mathtext, no LaTeX needed) and a progress bar.
+scienceplots>=2.2.1
+tqdm
