@@ -30,6 +30,25 @@ The build defines `-D__LZ4__` project-wide — hipo4 gates its LZ4 record
 decompression behind that macro, and HIPO files are LZ4-compressed, so without
 it no events are read.
 
+### Building on the JLab farm (ifarm, Linux)
+
+```sh
+git clone git@gitlab.com:MathieuOuillon/swim-cpp.git
+cd swim-cpp
+# Make the toolchain + libraries discoverable, e.g.:
+#   module load root        # puts root-config in PATH
+#   module load boost lz4    # or source your CLAS12 software environment
+#   pip install --user meson ninja   # if not already available
+meson setup build           # downloads/builds fmt via the wrap if not installed
+ninja -C build
+```
+
+Requirements on the farm: `root-config` in `PATH` (ROOT 6), Boost headers, lz4,
+and Meson/Ninja. fmt is used if installed, otherwise built from the
+`subprojects/fmt.wrap` (the first `meson setup` then needs network — run it on a
+login node). The macOS-only Homebrew paths in `meson.build` are guarded behind a
+`darwin` check, so they are ignored on Linux.
+
 ## Run
 
 ```sh
