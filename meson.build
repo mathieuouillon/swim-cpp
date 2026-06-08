@@ -17,7 +17,15 @@ cpp = meson.get_compiler('cpp')
 add_project_arguments('-D__LZ4__', language : 'cpp')
 
 # ---- lz4 (needed by hipo4) ------------------------------------------------
-lz4_dep = dependency('liblz4', method : 'pkg-config', required : true)
+# pkg-config name is usually 'liblz4'; some distros ship 'lz4'. Fall back to a
+# bare library lookup so the farm build works even without a .pc file.
+lz4_dep = dependency('liblz4', required : false)
+if not lz4_dep.found()
+  lz4_dep = dependency('lz4', required : false)
+endif
+if not lz4_dep.found()
+  lz4_dep = declare_dependency(dependencies : cpp.find_library('lz4', required : true))
+endif
 
 # ---- fmt (needed by hipo4) -------------------------------------------------
 # Try the system (pkg-config / cmake), then a macOS Homebrew keg (no
