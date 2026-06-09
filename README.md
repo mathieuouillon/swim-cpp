@@ -84,7 +84,11 @@ p, v_z–θ 2D, track-variable grid, the per-momentum resolution matrices
 ```sh
 pip install -r requirements.txt   # uproot, numpy, matplotlib, mplhep (+ optional scienceplots, tqdm)
 python plot_vz.py vz.root
+python plot_vz.py vz.root --suffix _rgd   # -> vz_confusion_matrix_rgd.pdf, etc.
 ```
+
+`--suffix`/`-s` is inserted before the `.pdf` of every figure, so outputs from
+different runs (datasets, field settings) don't overwrite each other.
 
 It degrades gracefully without `scienceplots`/LaTeX (uses matplotlib mathtext).
 The generator-thrown spectrum in `gen_vs_reco_p` reads single-pion `.lund` files

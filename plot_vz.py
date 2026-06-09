@@ -1,5 +1,3 @@
-import sys
-
 import uproot
 import numpy as np
 import matplotlib.pyplot as plt
@@ -851,7 +849,24 @@ def plot_vars(file_path: str = "vz.root", density: bool = True,
 
 
 if __name__ == "__main__":
+    import argparse
     import time
+
+    parser = argparse.ArgumentParser(
+        description="Render the v_z / PID diagnostic figures from a swim-analysis vz.root."
+    )
+    parser.add_argument("file", nargs="?", default="vz.root",
+                        help="input ROOT file (default: vz.root)")
+    parser.add_argument("-s", "--suffix", default="",
+                        help="string inserted before the '.pdf' extension of every output "
+                             "figure, e.g. --suffix _rgd -> vz_confusion_matrix_rgd.pdf")
+    cli = parser.parse_args()
+    file_path = cli.file
+
+    def op(name: str) -> str:
+        """Apply the --suffix to an output filename (before the extension)."""
+        stem, dot, ext = name.rpartition(".")
+        return f"{stem}{cli.suffix}.{ext}" if dot else f"{name}{cli.suffix}"
 
     # Optional pretty progress bar; falls back to plain prints if tqdm is absent.
     try:
@@ -860,43 +875,42 @@ if __name__ == "__main__":
     except Exception:
         _HAVE_TQDM = False
 
-    file_path = sys.argv[1] if len(sys.argv) > 1 else "vz.root"
-
     # (label, callable) for every figure, run in order with progress.
     steps = [
-        ("confusion_matrix", lambda: plot_confusion_matrix(file_path)),
-        ("vz_matrix_integrated", lambda: plot_vz_matrix_integrated(file_path)),
-        ("vz_matrix_p", lambda: plot_vz_matrix_p(file_path)),
-        ("truth_vs_reco", lambda: plot_truth_vs_reco(file_path)),
-        ("dvz_mean_vs_p", lambda: plot_dvz_mean_vs_p(file_path)),
-        ("vztheta", lambda: plot_vztheta(file_path)),
-        ("track_vars", lambda: plot_vars(file_path)),
-        ("sigtx_matrix_p", lambda: plot_res_matrix_p(file_path, "sigtx", r"$\sigma_{t_x}$")),
-        ("sigty_matrix_p", lambda: plot_res_matrix_p(file_path, "sigty", r"$\sigma_{t_y}$")),
-        ("sigtheta_matrix_p", lambda: plot_res_matrix_p(file_path, "sigtheta", r"$\sigma_\theta$ [mrad]")),
-        ("ptrue_vtx_dcr1", lambda: plot_ptrue_vtx_dcr1(file_path)),
-        ("dp_vtx_dcr1", lambda: plot_dp_vtx_dcr1(file_path)),
-        ("dp_vs_p", lambda: plot_dp_vs_p(file_path)),
-        ("dp_vtx_dcr1_zoom", lambda: plot_dp_vtx_dcr1(file_path, out_path="dp_vtx_dcr1_zoom.pdf", dprange=(-0.01, 0.05))),
-        ("dp_vs_p_zoom", lambda: plot_dp_vs_p(file_path, out_path="dp_vs_p_zoom.pdf", dprange=(-0.01, 0.05))),
-        ("dpf_vtx_dcr1", lambda: plot_dpf_vtx_dcr1(file_path)),
-        ("dpf_vs_p", lambda: plot_dpf_vs_p(file_path)),
-        ("dpf_vtx_dcr1_zoom", lambda: plot_dpf_vtx_dcr1(file_path, out_path="dpf_vtx_dcr1_zoom.pdf", frange=(-0.005, 0.02))),
-        ("dpf_vs_p_zoom", lambda: plot_dpf_vs_p(file_path, out_path="dpf_vs_p_zoom.pdf", frange=(-0.005, 0.02))),
-        ("gen_vs_reco_p (reads LUND files)", lambda: plot_gen_vs_reco_p(file_path)),
-        ("swum_minus_rec", lambda: plot_swum_minus_rec(file_path)),
-        ("swum_rec_vs_p", lambda: plot_swum_rec_vs_p(file_path)),
-        ("rec_vs_swum", lambda: plot_rec_vs_swum(file_path)),
-        ("swim_resolution", lambda: plot_swim_resolution(file_path)),
-        ("vz_reco_swim_p", lambda: plot_vz_reco_swim_p(file_path)),
-        ("recoswum_minus_rec", lambda: plot_recoswum_minus_rec(file_path)),
-        ("pr1_reco_vs_true", lambda: plot_pr1_reco_vs_true(file_path)),
-        ("pr1_reco_minus_true", lambda: plot_pr1_reco_minus_true(file_path)),
+        ("confusion_matrix", lambda: plot_confusion_matrix(file_path, out_path=op("vz_confusion_matrix.pdf"))),
+        ("vz_matrix_integrated", lambda: plot_vz_matrix_integrated(file_path, out_path=op("vz_matrix_integrated.pdf"))),
+        ("vz_matrix_p", lambda: plot_vz_matrix_p(file_path, out_path=op("vz_matrix_p.pdf"))),
+        ("truth_vs_reco", lambda: plot_truth_vs_reco(file_path, out_path=op("vz_truth_vs_reco.pdf"))),
+        ("dvz_mean_vs_p", lambda: plot_dvz_mean_vs_p(file_path, out_path=op("dvz_mean_vs_p.pdf"))),
+        ("vztheta", lambda: plot_vztheta(file_path, out_path=op("vz_theta_2d.pdf"))),
+        ("track_vars", lambda: plot_vars(file_path, out_path=op("track_vars.pdf"))),
+        ("sigtx_matrix_p", lambda: plot_res_matrix_p(file_path, "sigtx", r"$\sigma_{t_x}$", out_path=op("sigtx_matrix_p.pdf"))),
+        ("sigty_matrix_p", lambda: plot_res_matrix_p(file_path, "sigty", r"$\sigma_{t_y}$", out_path=op("sigty_matrix_p.pdf"))),
+        ("sigtheta_matrix_p", lambda: plot_res_matrix_p(file_path, "sigtheta", r"$\sigma_\theta$ [mrad]", out_path=op("sigtheta_matrix_p.pdf"))),
+        ("ptrue_vtx_dcr1", lambda: plot_ptrue_vtx_dcr1(file_path, out_path=op("ptrue_vtx_dcr1.pdf"))),
+        ("dp_vtx_dcr1", lambda: plot_dp_vtx_dcr1(file_path, out_path=op("dp_vtx_dcr1.pdf"))),
+        ("dp_vs_p", lambda: plot_dp_vs_p(file_path, out_path=op("dp_vs_p.pdf"))),
+        ("dp_vtx_dcr1_zoom", lambda: plot_dp_vtx_dcr1(file_path, out_path=op("dp_vtx_dcr1_zoom.pdf"), dprange=(-0.01, 0.05))),
+        ("dp_vs_p_zoom", lambda: plot_dp_vs_p(file_path, out_path=op("dp_vs_p_zoom.pdf"), dprange=(-0.01, 0.05))),
+        ("dpf_vtx_dcr1", lambda: plot_dpf_vtx_dcr1(file_path, out_path=op("dpf_vtx_dcr1.pdf"))),
+        ("dpf_vs_p", lambda: plot_dpf_vs_p(file_path, out_path=op("dpf_vs_p.pdf"))),
+        ("dpf_vtx_dcr1_zoom", lambda: plot_dpf_vtx_dcr1(file_path, out_path=op("dpf_vtx_dcr1_zoom.pdf"), frange=(-0.005, 0.02))),
+        ("dpf_vs_p_zoom", lambda: plot_dpf_vs_p(file_path, out_path=op("dpf_vs_p_zoom.pdf"), frange=(-0.005, 0.02))),
+        ("gen_vs_reco_p (reads LUND files)", lambda: plot_gen_vs_reco_p(file_path, out_path=op("gen_vs_reco_p.pdf"))),
+        ("swum_minus_rec", lambda: plot_swum_minus_rec(file_path, out_path=op("swum_minus_rec.pdf"))),
+        ("swum_rec_vs_p", lambda: plot_swum_rec_vs_p(file_path, out_path=op("swum_rec_vs_p.pdf"))),
+        ("rec_vs_swum", lambda: plot_rec_vs_swum(file_path, out_path=op("rec_vs_swum.pdf"))),
+        ("swim_resolution", lambda: plot_swim_resolution(file_path, out_path=op("swim_resolution.pdf"))),
+        ("vz_reco_swim_p", lambda: plot_vz_reco_swim_p(file_path, out_path=op("vz_reco_swim_p.pdf"))),
+        ("recoswum_minus_rec", lambda: plot_recoswum_minus_rec(file_path, out_path=op("recoswum_minus_rec.pdf"))),
+        ("pr1_reco_vs_true", lambda: plot_pr1_reco_vs_true(file_path, out_path=op("pr1_reco_vs_true.pdf"))),
+        ("pr1_reco_minus_true", lambda: plot_pr1_reco_minus_true(file_path, out_path=op("pr1_reco_minus_true.pdf"))),
     ]
 
     n = len(steps)
     say = tqdm.write if _HAVE_TQDM else print
-    print(f"Plotting {n} figures from {file_path}")
+    print(f"Plotting {n} figures from {file_path}"
+          + (f" (suffix '{cli.suffix}')" if cli.suffix else ""))
     bar = tqdm(total=n, unit="fig", desc="plots") if _HAVE_TQDM else None
     t_all = time.perf_counter()
     for i, (name, fn) in enumerate(steps, 1):
