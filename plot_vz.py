@@ -1,7 +1,9 @@
 import uproot
 import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib as mpl
+mpl.use("Agg")  # non-interactive backend: this script only writes PDFs. Forcing Agg
+                # avoids hanging on a dead X11/$DISPLAY forward on a headless farm node.
+import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.colors import LogNorm
 import matplotlib.patheffects as pe
