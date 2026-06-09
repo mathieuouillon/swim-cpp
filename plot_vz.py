@@ -143,12 +143,18 @@ def plot_confusion_matrix(file_path: str = "vz.root", out_path: str = "vz_confus
     frac = np.divide(mat, row, out=np.zeros_like(mat), where=row > 0)
     tex = [SPECIES_TEX[s] for s in SPECIES_TAG]
 
+    # interpolation_stage="rgba" applies the colormap/norm to the 4x4 data BEFORE
+    # resampling (not to the upsampled image), and "nearest" keeps crisp cells.
+    # Without this, LogNorm's log transform runs on the huge resampled array and
+    # savefig hangs on a headless render.
     fig, axs = plt.subplots(1, 2, figsize=(13, 5.5))
-    im0 = axs[0].imshow(np.where(mat > 0, mat, np.nan), cmap="viridis", norm=LogNorm(), aspect="auto")
+    im0 = axs[0].imshow(np.where(mat > 0, mat, np.nan), cmap="viridis", norm=LogNorm(),
+                        aspect="auto", interpolation="nearest", interpolation_stage="rgba")
     axs[0].set_title("Counts")
     fig.colorbar(im0, ax=axs[0], fraction=0.046, pad=0.04)
 
-    im1 = axs[1].imshow(frac, cmap="magma", vmin=0.0, vmax=1.0, aspect="auto")
+    im1 = axs[1].imshow(frac, cmap="magma", vmin=0.0, vmax=1.0, aspect="auto",
+                        interpolation="nearest", interpolation_stage="rgba")
     axs[1].set_title(r"Row-normalized $P(\mathrm{reco}\,|\,\mathrm{truth})$")
     fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
 
