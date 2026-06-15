@@ -75,7 +75,9 @@ public:
     static auto load(const std::string& torus_path, double torus_scale,
                      const std::string& solenoid_path, double solenoid_scale,
                      double solenoid_z_shift, double torus_z_shift = 0.0,
-                     double torus_x_shift = 0.0, double torus_y_shift = 0.0) -> composite_field;
+                     double torus_x_shift = 0.0, double torus_y_shift = 0.0,
+                     double solenoid_x_shift = 0.0, double solenoid_y_shift = 0.0)
+        -> composite_field;
 
     auto b_kgauss(double x, double y, double z) const -> std::array<double, 3> override;
 

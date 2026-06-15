@@ -31,7 +31,8 @@
 //   vz-swim-hist <input.root>... [--output FILE] [--jobs N] [--max-entries N]
 //                [--pid PID] [--dc-region 1|3] [--beam-x X] [--beam-y Y]
 //                [--torus PATH] [--solenoid PATH]
-//                [--torus-scale X] [--solenoid-scale X] [--solenoid-z-shift X]
+//                [--torus-scale X] [--solenoid-scale X]
+//                [--solenoid-z-shift X] [--solenoid-x-shift X] [--solenoid-y-shift X]
 //                [--torus-z-shift X] [--torus-x-shift X] [--torus-y-shift X]
 #include <algorithm>
 #include <array>
@@ -116,6 +117,8 @@ struct cli_args {
     double torus_scale = -1.0;
     double solenoid_scale = 1.0;
     double solenoid_z_shift = -3.0;
+    double solenoid_x_shift = 0.0;  // rigid solenoid-map transverse displacements [cm]
+    double solenoid_y_shift = 0.0;
     // Rigid torus-map displacements [cm] (0 = nominal survey position). A
     // transverse (x/y) shift is the diagnostic for a beamline-misalignment-like
     // 1/tan(theta) vz trend the solenoid z-shift cannot remove.
@@ -168,6 +171,8 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--torus-scale").default_value(-1.0).help("torus field scale");
     p.add_argument("--solenoid-scale").default_value(1.0).help("solenoid field scale");
     p.add_argument("--solenoid-z-shift").default_value(-3.0).help("solenoid map z-shift [cm]");
+    p.add_argument("--solenoid-x-shift").default_value(0.0).help("solenoid map x-shift [cm]");
+    p.add_argument("--solenoid-y-shift").default_value(0.0).help("solenoid map y-shift [cm]");
     p.add_argument("--torus-z-shift").default_value(0.0).help("torus map z-shift [cm]");
     p.add_argument("--torus-x-shift").default_value(0.0).help("torus map x-shift [cm]");
     p.add_argument("--torus-y-shift").default_value(0.0).help("torus map y-shift [cm]");
@@ -203,6 +208,8 @@ auto read_args(const argparse::parser& p) -> cli_args {
     a.torus_scale = p.get<double>("--torus-scale");
     a.solenoid_scale = p.get<double>("--solenoid-scale");
     a.solenoid_z_shift = p.get<double>("--solenoid-z-shift");
+    a.solenoid_x_shift = p.get<double>("--solenoid-x-shift");
+    a.solenoid_y_shift = p.get<double>("--solenoid-y-shift");
     a.torus_z_shift = p.get<double>("--torus-z-shift");
     a.torus_x_shift = p.get<double>("--torus-x-shift");
     a.torus_y_shift = p.get<double>("--torus-y-shift");
@@ -542,6 +549,8 @@ auto base_worker_argv(const std::string& exe, const cli_args& a) -> std::vector<
             "--torus-scale", fmt::format("{}", a.torus_scale),
             "--solenoid-scale", fmt::format("{}", a.solenoid_scale),
             "--solenoid-z-shift", fmt::format("{}", a.solenoid_z_shift),
+            "--solenoid-x-shift", fmt::format("{}", a.solenoid_x_shift),
+            "--solenoid-y-shift", fmt::format("{}", a.solenoid_y_shift),
             "--torus-z-shift", fmt::format("{}", a.torus_z_shift),
             "--torus-x-shift", fmt::format("{}", a.torus_x_shift),
             "--torus-y-shift", fmt::format("{}", a.torus_y_shift),
@@ -568,14 +577,16 @@ auto probe_entries(const cli_args& args) -> Long64_t {
 auto run_worker(const cli_args& args, Long64_t begin, Long64_t end, bool worker_mode) -> int {
     if (!worker_mode)
         fmt::print("loading field maps: torus={} (scale {}, shift x={} y={} z={} cm), "
-                   "solenoid={} (scale {}, z-shift {} cm)\n",
+                   "solenoid={} (scale {}, shift x={} y={} z={} cm)\n",
                    args.torus, args.torus_scale, args.torus_x_shift, args.torus_y_shift,
-                   args.torus_z_shift, args.solenoid, args.solenoid_scale, args.solenoid_z_shift);
+                   args.torus_z_shift, args.solenoid, args.solenoid_scale, args.solenoid_x_shift,
+                   args.solenoid_y_shift, args.solenoid_z_shift);
     std::unique_ptr<vz::composite_field> field_ptr;
     try {
         field_ptr = std::make_unique<vz::composite_field>(vz::composite_field::load(
             args.torus, args.torus_scale, args.solenoid, args.solenoid_scale,
-            args.solenoid_z_shift, args.torus_z_shift, args.torus_x_shift, args.torus_y_shift));
+            args.solenoid_z_shift, args.torus_z_shift, args.torus_x_shift, args.torus_y_shift,
+            args.solenoid_x_shift, args.solenoid_y_shift));
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: could not load field maps: %s\n", e.what());
         return 1;

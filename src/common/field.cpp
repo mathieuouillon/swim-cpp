@@ -181,11 +181,13 @@ auto field_map::b_cart(double x, double y, double z) const -> std::optional<std:
 
 auto composite_field::load(const std::string& torus_path, double torus_scale,
                            const std::string& solenoid_path, double solenoid_scale,
-                           double solenoid_z_shift, double torus_z_shift,
-                           double torus_x_shift, double torus_y_shift) -> composite_field {
+                           double solenoid_z_shift, double torus_z_shift, double torus_x_shift,
+                           double torus_y_shift, double solenoid_x_shift,
+                           double solenoid_y_shift) -> composite_field {
     return composite_field(
         field_map::load(torus_path, torus_scale, torus_z_shift, torus_x_shift, torus_y_shift),
-        field_map::load(solenoid_path, solenoid_scale, solenoid_z_shift));
+        field_map::load(solenoid_path, solenoid_scale, solenoid_z_shift, solenoid_x_shift,
+                        solenoid_y_shift));
 }
 
 auto composite_field::b_kgauss(double x, double y, double z) const -> std::array<double, 3> {

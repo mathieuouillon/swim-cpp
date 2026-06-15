@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Field-displacement scan for the electron-vz swim.
+"""Field-alignment scan for the vz swim.
 
-Runs vz-swim-hist once per swept value of a chosen field displacement
-(--scan-param: solenoid-z, torus-z, torus-x, torus-y) at most --max-parallel
-instances at a time, --threads-per-job threads each, with one live progress
-bar per running job (tqdm; plain prints without it), one subfolder per value:
+Runs vz-swim-hist once per swept value of a chosen field parameter
+(--scan-param: solenoid-x/y/z, torus-x/y/z map shifts [cm], torus-scale /
+solenoid-scale field scales, or dc-x/y/z DC start-state shifts) at most
+--max-parallel instances at a time, --threads-per-job threads each, with one
+live progress bar per running job (tqdm; plain prints without it), one
+subfolder per value:
 
   <scan-dir>/
     <param>_-3.00/vz_bins.root          histograms for that value
@@ -27,12 +29,12 @@ jobs need ~10+ GB of RAM.
 
 Usage (on the farm, from the repo root, after hipo2root):
   # geometric (p-flat) part of the vz theta-walk -> DC alignment:
-  python scan_zshift.py particles.root --beam-y -0.18 \
+  python scan_field.py particles.root --beam-y -0.18 \
       --scan-param dc-z --z-min -2 --z-max 2 --z-step 0.2
   # 1/p (magnetic) part -> field SCALE (sweep absolute value near nominal):
-  python scan_zshift.py particles.root --beam-y -0.18 \
+  python scan_field.py particles.root --beam-y -0.18 \
       --scan-param torus-scale --shifts -1.06 -1.04 -1.02 -1.00 -0.98 -0.96
-  python scan_zshift.py --scan-param dc-z --plot-only          # redo summary only
+  python scan_field.py --scan-param dc-z --plot-only          # redo summary only
 """
 import argparse
 import csv
@@ -123,6 +125,8 @@ MIN_ENTRIES = 500  # per-theta statistics threshold (p-integrated)
 PARAMS = {
     # field-map displacements [cm]
     "solenoid-z": ("--solenoid-z-shift", "solenoid z-shift"),
+    "solenoid-x": ("--solenoid-x-shift", "solenoid x-shift"),
+    "solenoid-y": ("--solenoid-y-shift", "solenoid y-shift"),
     "torus-z": ("--torus-z-shift", "torus z-shift"),
     "torus-x": ("--torus-x-shift", "torus x-shift"),
     "torus-y": ("--torus-y-shift", "torus y-shift"),
