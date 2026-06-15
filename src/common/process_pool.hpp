@@ -221,13 +221,21 @@ template <class Tick>
     return reap_workers(pids, [] {});
 }
 
-/// Merge partial ROOT files into `out_path`, summing same-named histograms
-/// bin-by-bin (TFileMerger is the engine behind `hadd`). Throws on failure.
-/// `compression` defaults to zstd level 5, matching analysis::write.
-inline auto merge_root_files(
-    const std::vector<std::string>& parts, const std::string& out_path,
-    int compression = ROOT::CompressionSettings(ROOT::RCompressionSetting::EAlgorithm::kZSTD, 5))
-    -> void {
+/// The compression for every partial file AND the merged output. They MUST
+/// match: only then can TFileMerger fast-clone TTree baskets (a raw compressed
+/// copy) instead of decompressing and recompressing every basket — the
+/// difference between a few seconds and minutes when merging a multi-GB tree.
+/// Writers of partial files (e.g. hipo2root's TFile) must use this too.
+[[nodiscard]] inline auto merge_compression() -> int {
+    return ROOT::CompressionSettings(ROOT::RCompressionSetting::EAlgorithm::kZSTD, 5);
+}
+
+/// Merge partial ROOT files into `out_path`. TTrees are concatenated (baskets
+/// fast-cloned when the partials share `merge_compression()`); same-named
+/// histograms are summed bin-by-bin — TFileMerger is the engine behind `hadd`.
+/// Throws on failure.
+inline auto merge_root_files(const std::vector<std::string>& parts, const std::string& out_path,
+                             int compression = merge_compression()) -> void {
     TFileMerger merger(/*isLocal=*/kFALSE, /*histoOneGo=*/kFALSE);
     if (!merger.OutputFile(out_path.c_str(), "RECREATE", compression))
         throw std::runtime_error(fmt::format("cannot open merge output '{}'", out_path));

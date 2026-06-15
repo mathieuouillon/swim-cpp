@@ -18,6 +18,7 @@
 // Usage:
 //   hipo2root <input>... [--output FILE] [--jobs N] [--ccdb FILE] [--quiet]
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -387,7 +388,9 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
         return 1;
     }
 
-    TFile fout(args.output.c_str(), "RECREATE");
+    // Match the merge compression so the supervisor can fast-clone these
+    // partials' baskets (raw copy) instead of recompressing the whole tree.
+    TFile fout(args.output.c_str(), "RECREATE", "", vz::merge_compression());
     if (fout.IsZombie()) {
         std::fprintf(stderr, "error: could not create '%s'\n", args.output.c_str());
         return 1;
@@ -573,6 +576,11 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
         std::filesystem::remove_all(dir, ec);
         return 1;
     }
+    if (!args.quiet) {
+        fmt::print("hipo2root: merging {} partial file(s) -> {} ...\n", parts.size(), args.output);
+        std::fflush(stdout);
+    }
+    const auto t_merge = std::chrono::steady_clock::now();
     try {
         vz::merge_root_files(parts, args.output);
     } catch (const std::exception& e) {
@@ -581,6 +589,10 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
         std::filesystem::remove_all(dir, ec);
         return 1;
     }
+    if (!args.quiet)
+        fmt::print(
+            "hipo2root: merged in {:.1f}s\n",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t_merge).count());
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 
