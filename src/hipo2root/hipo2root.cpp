@@ -50,6 +50,7 @@ struct cli_args {
     bool quiet = false;
     bool worker = false;      // hidden: set by the supervisor on each re-exec
     std::string ccdb;         // CCDB sqlite snapshot; empty = skip the CCDB lookup
+    std::string ccdb_variation = "default";  // CCDB variation for the lookup
 };
 
 // Build the command-line parser (external/argparse). --worker is a hidden marker
@@ -74,6 +75,10 @@ auto build_parser() -> argparse::parser {
         .default_value("")
         .help("CCDB SQLite snapshot; look up beam position + solenoid shift by run and save "
               "them (with the run number) in the output file");
+    p.add_argument("--ccdb-variation")
+        .default_value("default")
+        .help("CCDB variation for the lookup (e.g. rga_spring2018, rgc_spring2023); the "
+              "solenoid z-shift in particular is variation-dependent");
     p.add_argument("-q", "--quiet").flag().help("suppress the progress bar");
     p.add_argument("--worker").flag().hidden();  // re-exec'd worker marker
     return p;
@@ -301,7 +306,8 @@ struct particle_dumper {
 // Read RUN::config (run number + field scales, negated into our convention) and,
 // when a CCDB snapshot is given, the beam offset + solenoid z-shift for that run.
 // Packaged for saving into the output file; vz-swim-hist reads it back.
-auto compute_run_meta(const std::string& src_file, const std::string& ccdb_path) -> vz::run_meta {
+auto compute_run_meta(const std::string& src_file, const std::string& ccdb_path,
+                      const std::string& variation) -> vz::run_meta {
     vz::run_meta m;
     if (auto fr = hipo::file::open(src_file)) {
         hipo::file& f = *fr;
@@ -327,7 +333,7 @@ auto compute_run_meta(const std::string& src_file, const std::string& ccdb_path)
         const auto first = [&](const std::string& path,
                                std::initializer_list<const char*> cols) -> std::optional<double> {
             for (const char* col : cols)
-                if (auto v = db.value(path, m.run, col)) return v;
+                if (auto v = db.value(path, m.run, col, variation)) return v;
             return std::nullopt;
         };
         if (auto v = first("/geometry/beam/position", {"x", "x_offset"})) m.beam_x = *v;
@@ -431,7 +437,7 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
     tree.Write();
     // The final (single, non-worker) file carries the run + CCDB metadata; worker
     // part files do not, so it is written once into the merged supervisor output.
-    if (!worker_mode) compute_run_meta(paths[0], args.ccdb).write(fout);
+    if (!worker_mode) compute_run_meta(paths[0], args.ccdb, args.ccdb_variation).write(fout);
     fout.Close();
 
     if (!worker_mode) fmt::print("wrote {} particles to {}\n", dumper.n_particles, args.output);
@@ -495,7 +501,7 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
     {
         TFile f(args.output.c_str(), "UPDATE");
         if (!f.IsZombie()) {
-            compute_run_meta(paths[0], args.ccdb).write(f);
+            compute_run_meta(paths[0], args.ccdb, args.ccdb_variation).write(f);
             if (auto* t = dynamic_cast<TTree*>(f.Get("particles"))) total = t->GetEntries();
             f.Close();
         }
@@ -526,6 +532,7 @@ auto main(int argc, char** argv) -> int {
     args.quiet = p.get<bool>("--quiet");
     args.worker = p.get<bool>("--worker");
     args.ccdb = p.get<std::string>("--ccdb");
+    args.ccdb_variation = p.get<std::string>("--ccdb-variation");
 
     // --run-config: just report each input's RUN::config (run number, torus and
     // solenoid scale factors) without producing a tree.
