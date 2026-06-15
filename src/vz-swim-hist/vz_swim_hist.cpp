@@ -1,9 +1,11 @@
-// Electron v_z in (p, theta) bins, with a DC-R1 -> beamline swim.
+// Charged-track v_z in (p, theta) bins, with a DC-R1 -> beamline swim.
 //
 // Reads the flat `particles` TTree written by hipo2root, selects Forward-
-// Detector electrons (pid == 11), swims their DC trajectory state back to the
-// beamline through the CLAS12 field (same swimmer and field configuration as
-// swim-analysis), and histograms per (p, theta) cell:
+// Detector tracks of one species by reconstructed pid (--pid, default 11 = e-;
+// e.g. 211 / -211 for pions, with the swim charge taken from the pid), swims
+// their DC trajectory state back to the beamline through the CLAS12 field (same
+// swimmer and field configuration as swim-analysis), and histograms per
+// (p, theta) cell:
 //   vz_rec_pAA_BB_thCC_DD   EB-reconstructed v_z          [-13, 0] cm
 //   vz_swum_pAA_BB_thCC_DD  swum-back v_z                 [-13, 0] cm
 //   dvz_pAA_BB_thCC_DD      swum - rec                    [-10, 10] cm
@@ -27,7 +29,7 @@
 //
 // Usage:
 //   vz-swim-hist <input.root>... [--output FILE] [--jobs N] [--max-entries N]
-//                [--dc-region 1|3] [--beam-x X] [--beam-y Y]
+//                [--pid PID] [--dc-region 1|3] [--beam-x X] [--beam-y Y]
 //                [--torus PATH] [--solenoid PATH]
 //                [--torus-scale X] [--solenoid-scale X] [--solenoid-z-shift X]
 //                [--torus-z-shift X] [--torus-x-shift X] [--torus-y-shift X]
@@ -55,6 +57,7 @@
 #include "field.hpp"
 #include "process_pool.hpp"
 #include "progresstracker.hpp"
+#include "run_meta.hpp"
 #include "swim.hpp"
 
 namespace {
@@ -96,6 +99,7 @@ struct cli_args {
     long long entry_end = -1;
     // Swim configuration, mirroring coatjava's vertex procedure.
     int dc_region = 3;    // start state: DC region 3 (coatjava) or 1
+    int pid = 11;         // species to analyze by reco pid: 11 e-, 211 pi+, -211 pi-
     double beam_x = 0.0;  // CCDB /geometry/beam/position x_offset [cm]
     double beam_y = 0.0;  // CCDB /geometry/beam/position y_offset [cm]
     // vz theta-walk correction: the swum (and rec) vz has a bias ~ a(p)*cot(theta)
@@ -158,6 +162,9 @@ auto build_parser() -> argparse::parser {
         .default_value(3)
         .choices({1, 3})
         .help("DC start state: region 1 or 3 (coatjava uses 3)");
+    p.add_argument("--pid")
+        .default_value(11)
+        .help("species to analyze by reconstructed pid (11 = e-, 211 = pi+, -211 = pi-)");
     p.add_argument("--beam-x").default_value(0.0).help("CCDB beam x offset [cm]");
     p.add_argument("--beam-y").default_value(0.0).help("CCDB beam y offset [cm]");
     p.add_argument("--torus")
@@ -198,6 +205,7 @@ auto read_args(const argparse::parser& p) -> cli_args {
     a.entry_begin = p.get<long long>("--entry-begin");
     a.entry_end = p.get<long long>("--entry-end");
     a.dc_region = p.get<int>("--dc-region");
+    a.pid = p.get<int>("--pid");
     a.beam_x = p.get<double>("--beam-x");
     a.beam_y = p.get<double>("--beam-y");
     a.vz_cot_coeff = p.get<double>("--vz-cot-coeff");
@@ -214,6 +222,35 @@ auto read_args(const argparse::parser& p) -> cli_args {
     a.dc_y_shift = p.get<double>("--dc-y-shift");
     a.dc_z_shift = p.get<double>("--dc-z-shift");
     return a;
+}
+
+// Default the field config (field scales, solenoid z-shift, beam offset) from the
+// input file's run metadata — hipo2root writes it from RUN::config + CCDB — for
+// any of those the user did not pass explicitly on the command line. Silent when
+// the file carries no metadata (an older particles.root). Workers receive the
+// already-resolved values from the supervisor via argv, so this runs only in the
+// user-facing (lone / supervisor) process.
+auto apply_run_meta(cli_args& a, const argparse::parser& p) -> void {
+    if (a.inputs.empty()) return;
+    TFile f(a.inputs.front().c_str());
+    if (f.IsZombie()) return;
+    vz::run_meta m;
+    m.torus_scale = a.torus_scale;
+    m.solenoid_scale = a.solenoid_scale;
+    m.solenoid_z_shift = a.solenoid_z_shift;
+    m.beam_x = a.beam_x;
+    m.beam_y = a.beam_y;
+    if (!vz::run_meta::read(f, m)) return;
+    if (!p.is_used("--torus-scale")) a.torus_scale = m.torus_scale;
+    if (!p.is_used("--solenoid-scale")) a.solenoid_scale = m.solenoid_scale;
+    if (!p.is_used("--solenoid-z-shift")) a.solenoid_z_shift = m.solenoid_z_shift;
+    if (!p.is_used("--beam-x")) a.beam_x = m.beam_x;
+    if (!p.is_used("--beam-y")) a.beam_y = m.beam_y;
+    if (!a.quiet)
+        fmt::print("run {} field config from {} metadata: torus_scale={} solenoid_scale={} "
+                   "solenoid_z_shift={} beam=({}, {})\n",
+                   m.run, a.inputs.front(), a.torus_scale, a.solenoid_scale, a.solenoid_z_shift,
+                   a.beam_x, a.beam_y);
 }
 
 // `pAA_BB_thCC_DD` name fragment for cell (pb, tb), edges zero-padded.
@@ -306,6 +343,16 @@ struct cell_grid {
     }
 };
 
+// Charge [e] of a particle from its PDG id, for the species this analysis can
+// select via --pid (e-, pi+/-, mu+/-, K+/-, p); falls back to the id sign.
+auto charge_of(int pid) -> double {
+    switch (pid) {
+        case 11: case 13: case -211: case -321: case -2212: return -1.0;  // e- mu- pi- K- pbar
+        case -11: case -13: case 211: case 321: case 2212: return 1.0;    // e+ mu+ pi+ K+ p
+        default: return pid > 0 ? 1.0 : -1.0;
+    }
+}
+
 // One worker: read entries [begin, end) through a private TChain, swim, and
 // fill the private cell_grid. Shares only the read-only field map and the
 // (thread-safe) progress tracker.
@@ -317,7 +364,7 @@ struct swim_worker {
 
     cell_grid grid;
     // Cut flow.
-    long long n_electron_fd = 0;  // FD electrons
+    long long n_fd = 0;  // Forward-Detector tracks of the selected species (--pid)
     long long n_in_grid = 0;      // ... inside the (p, theta) grid
     long long n_with_dc = 0;      // ... with the chosen DC trajectory state
     long long n_swim_ok = 0;      // ... whose swim converged (-> filled)
@@ -350,6 +397,8 @@ struct swim_worker {
         tree.SetBranchAddress("raster_x", &raster_x);
         tree.SetBranchAddress("raster_y", &raster_y);
 
+        const double q = charge_of(args->pid);  // swim charge for the selected species
+
         constexpr Long64_t PROGRESS_CHUNK = 8192;  // amortize the atomic add
         Long64_t since_report = 0;
         for (Long64_t i = begin; i < end; ++i) {
@@ -358,9 +407,9 @@ struct swim_worker {
                 progress->add(static_cast<std::size_t>(PROGRESS_CHUNK));
                 since_report = 0;
             }
-            if (pid != 11) continue;
+            if (pid != args->pid) continue;
             if (!vz::is_forward(status)) continue;
-            ++n_electron_fd;
+            ++n_fd;
 
             const double p = std::sqrt(double(px) * px + double(py) * py + double(pz) * pz);
             if (p <= 0.0) continue;
@@ -388,7 +437,7 @@ struct swim_worker {
                                                dc_z + args->dc_z_shift};
             const std::array<double, 3> mom = {p * dc_cx, p * dc_cy, p * dc_cz};
             const vz::swim_result sw =
-                vz::swim_back_to_beamline(*field, pos, mom, /*q=*/-1.0, x_b, y_b);
+                vz::swim_back_to_beamline(*field, pos, mom, /*q=*/q, x_b, y_b);
             if (sw.status != vz::swim_status::converged || sw.doca_rho >= vz::SWUM_MAX_DOCA_RHO)
                 continue;
             ++n_swim_ok;
@@ -423,7 +472,7 @@ struct swim_worker {
 // per worker. Plain text, one value per line, in declaration order.
 struct swim_counts {
     long long n_entries = 0;
-    long long n_electron_fd = 0;
+    long long n_fd = 0;
     long long n_in_grid = 0;
     long long n_with_dc = 0;
     long long n_swim_ok = 0;
@@ -433,7 +482,7 @@ struct swim_counts {
         std::ofstream out(path);
         if (!out) throw std::runtime_error(fmt::format("cannot write counts '{}'", path));
         out << n_entries << '\n'
-            << n_electron_fd << '\n'
+            << n_fd << '\n'
             << n_in_grid << '\n'
             << n_with_dc << '\n'
             << n_swim_ok << '\n'
@@ -446,7 +495,7 @@ struct swim_counts {
         double sv = 0.0;
         in >> ne >> nf >> ng >> nd >> no >> sv;
         n_entries += ne;
-        n_electron_fd += nf;
+        n_fd += nf;
         n_in_grid += ng;
         n_with_dc += nd;
         n_swim_ok += no;
@@ -481,7 +530,7 @@ auto write_grid(const cell_grid& grid, const std::string& path) -> void {
 auto print_summary(const cli_args& a, const swim_counts& c, const std::string& output) -> void {
     fmt::print("----------------------------------------\n");
     fmt::print("particles          : {}\n", c.n_entries);
-    fmt::print("FD electrons       : {}\n", c.n_electron_fd);
+    fmt::print("FD tracks (pid {:>4}): {}\n", a.pid, c.n_fd);
     fmt::print("  in (p,theta) grid: {}\n", c.n_in_grid);
     fmt::print("  with DC-R{} state : {}\n", a.dc_region, c.n_with_dc);
     fmt::print("  swim converged   : {}  (filled)\n", c.n_swim_ok);
@@ -501,6 +550,7 @@ auto print_summary(const cli_args& a, const swim_counts& c, const std::string& o
 auto base_worker_argv(const std::string& exe, const cli_args& a) -> std::vector<std::string> {
     return {exe,
             "--jobs", "1", "--quiet",
+            "--pid", fmt::format("{}", a.pid),
             "--dc-region", fmt::format("{}", a.dc_region),
             "--beam-x", fmt::format("{}", a.beam_x),
             "--beam-y", fmt::format("{}", a.beam_y),
@@ -575,7 +625,7 @@ auto run_worker(const cli_args& args, Long64_t begin, Long64_t end, bool worker_
         return 1;
     }
 
-    swim_counts c{end - begin,         worker.n_electron_fd, worker.n_in_grid,
+    swim_counts c{end - begin,         worker.n_fd, worker.n_in_grid,
                   worker.n_with_dc,    worker.n_swim_ok,     worker.sum_swum_vz};
     if (worker_mode) {
         try {
@@ -675,9 +725,12 @@ auto main(int argc, char** argv) -> int {
         fmt::print(stderr, "error: {}\n\n{}", e.what(), p.usage());
         return 2;
     }
-    const cli_args args = read_args(p);
-
+    cli_args args = read_args(p);
     const bool worker_mode = !args.emit_counts.empty();
+    // Resolve the field config from the input file's run metadata (RUN::config +
+    // CCDB, written by hipo2root) for anything not set on the CLI. Workers inherit
+    // the resolved values from the supervisor's argv, so skip it there.
+    if (!worker_mode) apply_run_meta(args, p);
 
     const Long64_t total_entries = probe_entries(args);
     if (total_entries < 0) return 1;

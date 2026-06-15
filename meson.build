@@ -73,6 +73,9 @@ if not boost_dep.found()
   boost_dep = dependency('boost', required : true)
 endif
 
+# ---- SQLite3 (CCDB snapshot reader, src/common/ccdb.hpp) -------------------
+sqlite3_dep = dependency('sqlite3', required : true)
+
 # Shared code lives in src/common/; each program has its own src/<program>/ dir.
 common_inc = include_directories('src/common')
 
@@ -95,7 +98,7 @@ executable(
 executable(
   'hipo2root',
   ['src/hipo2root/hipo2root.cpp'],
-  dependencies        : [hipo_dep, root_dep, fmt_dep, argparse_dep],
+  dependencies        : [hipo_dep, root_dep, fmt_dep, argparse_dep, sqlite3_dep],
   include_directories : common_inc,
   install             : true,
 )
@@ -133,3 +136,11 @@ test_argparse = executable(
   dependencies : argparse_dep,
 )
 test('argparse', test_argparse)
+
+test_ccdb = executable(
+  'test_ccdb',
+  ['test/test_ccdb.cpp'],
+  dependencies        : sqlite3_dep,
+  include_directories : common_inc,
+)
+test('ccdb', test_ccdb)

@@ -9,6 +9,7 @@ build*/
 *.dat
 *.evio
 *.pdf
+*.sqlite
 
 # Meson subprojects: keep the .wrap files, ignore downloaded sources + cache
 /subprojects/*/

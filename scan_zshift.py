@@ -48,6 +48,7 @@ import uproot
 import matplotlib as mpl
 mpl.use("Agg")  # headless farm node: only writes PDFs
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 
 # ── Per-job progress bars ────────────────────────────────────────────────────
 # Each job's vz-swim-hist runs with its progress bar enabled; we parse the
@@ -301,6 +302,44 @@ def find_peak(vals: np.ndarray, centers: np.ndarray, lo: float, hi: float):
     return float(centers[k] + 0.5 * bw * (y0 - y2) / denom)
 
 
+def fit_peak2_top(vals: np.ndarray, centers: np.ndarray, lo: float, hi: float,
+                  top_frac: float = 0.5):
+    """Gaussian fit of the TOP of the peak in [lo, hi).
+
+    A Gaussian is a parabola in log-counts: ln y = c0 + c1 x + c2 x^2, so a
+    quadratic least-squares fit to ln(counts) of the bins near the maximum gives
+    mean = -c1 / (2 c2) and sigma = sqrt(-1 / (2 c2)) with no curve_fit / scipy.
+    Only bins at >= top_frac * peak-height (and > 0) are used, so it characterises
+    the top of the peak rather than its tails. Returns
+    (mean, sigma, amp, x_fit, y_fit) or None when there is no usable peak."""
+    sel = (centers >= lo) & (centers < hi)
+    if not np.any(sel):
+        return None
+    idx = np.flatnonzero(sel)
+    pk = vals[idx].max()
+    if pk <= 0:
+        return None
+    kmax = idx[np.argmax(vals[idx])]
+    top = idx[(vals[idx] >= top_frac * pk) & (vals[idx] > 0)]
+    if top.size < 3:  # fall back to the 5 bins straddling the maximum
+        top = np.array([k for k in range(kmax - 2, kmax + 3)
+                        if 0 <= k < len(vals) and vals[k] > 0])
+    if top.size < 3:
+        return None
+    x, y = centers[top], vals[top]
+    c2, c1, c0 = np.polyfit(x, np.log(y), 2)
+    if c2 >= 0:  # upward parabola -> not a peak
+        return None
+    mean = -c1 / (2.0 * c2)
+    sigma = float(np.sqrt(-1.0 / (2.0 * c2)))
+    if not (lo <= mean < hi) or not np.isfinite(sigma):
+        return None
+    amp = float(np.exp(c0 - c1 * c1 / (4.0 * c2)))  # height at x = mean
+    xf = np.linspace(float(x.min()), float(x.max()), 200)
+    yf = amp * np.exp(-((xf - mean) ** 2) / (2.0 * sigma ** 2))
+    return float(mean), sigma, amp, xf, yf
+
+
 def swum_peaks(root_file: Path) -> dict[tuple[int, str], float]:
     """{(theta_lo, peak_name): position} from the p-integrated swum-vz
     histograms (theta bins below MIN_ENTRIES are skipped)."""
@@ -410,6 +449,86 @@ def write_summary(scan_dir: Path, param: str, vals: list[float]):
     if best is not None:
         print(f"Best alignment: {label} {vfmt(best)} "
               f"(mean peak RMS across theta = {metric[best]:.3f} cm)")
+
+
+def write_peak2_fits(scan_dir: Path, param: str, vals: list[float]):
+    """<param>_peak2_fit.pdf + .csv: a Gaussian fit of the top of the SECOND
+    (downstream, ~ -3 cm) swum-vz peak with its mean and sigma.
+
+    For each scan value the swum-vz histogram is integrated over the whole
+    (p, theta) grid, the top of peak2 is fit (see fit_peak2_top), and a page
+    shows the spectrum, the fitted Gaussian, and the extracted mean/sigma. A
+    final page plots peak2 mean and sigma versus the scanned parameter."""
+    label = PARAMS[param][1]
+    _, lo2, hi2 = PEAK_WINDOWS[1]  # ("peak2", -5.5, -0.5)
+    fits: dict[float, tuple[float, float]] = {}  # value -> (mean, sigma)
+
+    out = scan_dir / f"{param}_peak2_fit.pdf"
+    with PdfPages(out) as pdf:
+        for v in sorted(vals):
+            rf = job_dir(scan_dir, param, v) / "vz_bins.root"
+            if not rf.exists():
+                continue
+            tot, edges = None, None
+            with uproot.open(rf) as f:
+                for p_lo, p_hi in P_BINS:
+                    for t_lo, t_hi in TH_BINS:
+                        key = _key("vz_swum", p_lo, p_hi, t_lo, t_hi)
+                        if key not in f:
+                            continue
+                        hv, edges = f[key].to_numpy()
+                        tot = hv if tot is None else tot + hv
+            if tot is None or tot.sum() < MIN_ENTRIES:
+                continue
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            fit = fit_peak2_top(tot, centers, lo2, hi2)
+
+            fig, ax = plt.subplots(figsize=(7, 5))
+            bw = centers[1] - centers[0]
+            ax.bar(centers, tot, width=bw, color="0.85", edgecolor="0.6", lw=0.3,
+                   label=r"swum $v_z$ (p, $\theta$ integrated)")
+            ax.axvspan(lo2, hi2, color="tab:blue", alpha=0.07, label="peak2 window")
+            if fit is not None:
+                mean, sigma, amp, xf, yf = fit
+                fits[v] = (mean, sigma)
+                ax.plot(xf, yf, color="tab:red", lw=2.0, label="Gaussian fit (top)")
+                ax.axvline(mean, color="tab:red", ls=":", lw=1.0)
+                ax.text(0.025, 0.97,
+                        f"peak2 Gaussian fit\n$\\mu$ = {mean:.3f} cm\n$\\sigma$ = {sigma:.3f} cm",
+                        transform=ax.transAxes, va="top", ha="left", fontsize=10,
+                        bbox=dict(boxstyle="round", fc="white", ec="0.7"))
+            else:
+                ax.text(0.025, 0.97, "peak2 fit failed", transform=ax.transAxes,
+                        va="top", ha="left", color="tab:red")
+            ax.set_xlabel(r"swum $v_z$ [cm]")
+            ax.set_ylabel("counts")
+            ax.set_title(f"{label} {v:+.2f} cm — 2nd-peak Gaussian fit")
+            ax.legend(fontsize=8, loc="upper right")
+            fig.tight_layout()
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+
+        if fits:
+            vs = sorted(fits)
+            fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.5))
+            a1.plot(vs, [fits[v][0] for v in vs], marker="o", color="tab:red")
+            a1.set_xlabel(f"{label} [cm]"); a1.set_ylabel(r"peak2 $\mu$ [cm]")
+            a1.set_title(r"2nd-peak mean vs " + label)
+            a2.plot(vs, [fits[v][1] for v in vs], marker="o", color="tab:blue")
+            a2.set_xlabel(f"{label} [cm]"); a2.set_ylabel(r"peak2 $\sigma$ [cm]")
+            a2.set_title(r"2nd-peak width vs " + label)
+            fig.tight_layout()
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+    print(f"Saved {out}")
+
+    csv_path = scan_dir / f"{param}_peak2_fit.csv"
+    with open(csv_path, "w", newline="") as cf:
+        w = csv.writer(cf)
+        w.writerow([param, "peak2_mean_cm", "peak2_sigma_cm"])
+        for v in sorted(fits):
+            w.writerow([vfmt(v), f"{fits[v][0]:.4f}", f"{fits[v][1]:.4f}"])
+    print(f"Saved {csv_path}")
 
 
 def write_grid_summary(scan_dir: Path, combos: list[tuple[float, float, float]]):
@@ -588,6 +707,7 @@ def run_1d(args, vals: list[float]):
 
     make_overlays(scan_dir, param, vals)
     write_summary(scan_dir, param, vals)
+    write_peak2_fits(scan_dir, param, vals)
 
 
 def run_grid(args, vals: list[float]):

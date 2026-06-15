@@ -3,16 +3,20 @@
 // One TTree entry per reconstructed particle, holding the PID, momentum
 // (px, py, pz), the z vertex (vz), the status word, the DC Region-1 and
 // Region-3 trajectory states from REC::Traj (position + direction cosines,
-// NaN when absent), the per-event RASTER::position beam offset, plus the
-// event index it came from. The RUN::config torus/solenoid scales are printed
-// at startup (feed them to vz-swim-hist).
+// NaN when absent), the per-event RASTER::position beam offset, the run number,
+// and the matched MC truth (true_pid / true_p / true_vz from MC::Particle via
+// MC::RecMatch; 0 / NaN in real data) — e.g. for pion reco-vs-truth studies.
+//
+// With --ccdb FILE the beam position + solenoid z-shift are looked up from a
+// CCDB SQLite snapshot by run and saved, with the run number and field scales,
+// as ROOT metadata (TParameters) that vz-swim-hist reads back automatically.
 //
 // Reads with the hipo4 chain. Parallelism is by PROCESS: with --jobs N the
 // inputs are sharded across N re-exec'd single-threaded copies, each writing a
 // partial TTree, which the supervisor then merges (see process_pool.hpp).
 //
 // Usage:
-//   hipo2root <input>... [--output FILE] [--jobs N] [--quiet]
+//   hipo2root <input>... [--output FILE] [--jobs N] [--ccdb FILE] [--quiet]
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -29,10 +33,12 @@
 
 #include "argparse/argparse.hpp"
 #include "bank_access.hpp"
+#include "ccdb.hpp"
 #include "constants.hpp"
 #include "hipo4/hipo.hpp"
 #include "hipo_chain.hpp"
 #include "process_pool.hpp"
+#include "run_meta.hpp"
 
 namespace {
 
@@ -43,6 +49,7 @@ struct cli_args {
     bool run_config = false;  // only print RUN::config (per input file) and exit
     bool quiet = false;
     bool worker = false;      // hidden: set by the supervisor on each re-exec
+    std::string ccdb;         // CCDB sqlite snapshot; empty = skip the CCDB lookup
 };
 
 // Build the command-line parser (external/argparse). --worker is a hidden marker
@@ -63,15 +70,21 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--run-config")
         .flag()
         .help("only print each input's RUN::config (run, torus/solenoid scales) and exit");
+    p.add_argument("--ccdb")
+        .default_value("")
+        .help("CCDB SQLite snapshot; look up beam position + solenoid shift by run and save "
+              "them (with the run number) in the output file");
     p.add_argument("-q", "--quiet").flag().help("suppress the progress bar");
     p.add_argument("--worker").flag().hidden();  // re-exec'd worker marker
     return p;
 }
 
-// Banks the dump reads. REC::Particle is required; REC::Traj and
-// RASTER::position are optional (their branches are NaN when absent).
-const std::vector<std::string> WANTED_BANKS = {"REC::Particle", "REC::Traj",
-                                               "RASTER::position"};
+// Banks the dump reads. REC::Particle is required; the rest are optional (absent
+// -> their branches are NaN / 0). RUN::config gives the run number; MC::Particle
+// + MC::RecMatch give the matched MC truth (e.g. for pions) in simulation.
+const std::vector<std::string> WANTED_BANKS = {
+    "REC::Particle", "REC::Traj",   "RASTER::position",
+    "RUN::config",   "MC::Particle", "MC::RecMatch"};
 
 // Keep only the wanted banks present in the first file's dictionary, so the
 // banklist construction never throws on a missing schema.
@@ -136,6 +149,9 @@ struct particle_dumper {
     long rec_particle = -1;  // banklist index of REC::Particle
     long rec_traj = -1;      // banklist index of REC::Traj (-1 = absent)
     long raster_pos = -1;    // banklist index of RASTER::position (-1 = absent)
+    long run_config = -1;    // banklist index of RUN::config (-1 = absent)
+    long mc_particle = -1;   // banklist index of MC::Particle (-1 = absent)
+    long mc_recmatch = -1;   // banklist index of MC::RecMatch (-1 = absent)
     TTree* tree = nullptr;
 
     // Branch buffers (one row per particle).
@@ -152,6 +168,12 @@ struct particle_dumper {
     // Per-event raster beam position [cm] from RASTER::position; NaN when
     // absent. The reconstruction adds this to the CCDB beam offset.
     Float_t raster_x = 0.f, raster_y = 0.f;
+    // Run number (RUN::config), constant per event.
+    Int_t run = 0;
+    // Matched MC truth (MC::Particle via MC::RecMatch); 0 / NaN when unmatched or
+    // in real data. Lets pion (and electron) reco be compared to truth.
+    Int_t true_pid = 0;
+    Float_t true_px = 0.f, true_py = 0.f, true_pz = 0.f, true_vz = 0.f;
 
     long long n_particles = 0;
 
@@ -162,6 +184,8 @@ struct particle_dumper {
         Int_t status;
         Float_t dc_x, dc_y, dc_z, dc_cx, dc_cy, dc_cz;
         Float_t dc3_x, dc3_y, dc3_z, dc3_cx, dc3_cy, dc3_cz;
+        Int_t true_pid;
+        Float_t true_px, true_py, true_pz, true_vz;
     };
 
     auto operator()(vz::bank_list& bl, int /*file_idx*/, long event_idx) -> void {
@@ -177,6 +201,24 @@ struct particle_dumper {
             ras_x = static_cast<Float_t>(raster.get<double>("x", 0));
             ras_y = static_cast<Float_t>(raster.get<double>("y", 0));
         }
+
+        // Run number (constant per event).
+        hipo::bank_view cfg = run_config >= 0 ? bl[run_config] : hipo::bank_view{};
+        const Int_t rn = cfg.rows() > 0 ? cfg.get<int>("run", 0) : 0;
+
+        // Map each reco row to its matched MC::Particle index via MC::RecMatch.
+        hipo::bank_view mc = mc_particle >= 0 ? bl[mc_particle] : hipo::bank_view{};
+        hipo::bank_view mtch = mc_recmatch >= 0 ? bl[mc_recmatch] : hipo::bank_view{};
+        std::vector<int> mc_of(static_cast<std::size_t>(n), -1);
+        if (mc && mtch) {
+            const int mr = static_cast<int>(mtch.rows());
+            for (int m = 0; m < mr; ++m) {
+                const int pi = mtch.get<int>("pindex", m);
+                if (pi >= 0 && pi < n)
+                    mc_of[static_cast<std::size_t>(pi)] = mtch.get<int>("mcindex", m);
+            }
+        }
+        const int mc_rows = mc ? static_cast<int>(mc.rows()) : 0;
 
         // Decode each REC::Particle row into a staging buffer.
         std::vector<row> rows;
@@ -208,12 +250,22 @@ struct particle_dumper {
                 r.dc3_cy = static_cast<Float_t>(traj.get<double>("cy", *k));
                 r.dc3_cz = static_cast<Float_t>(traj.get<double>("cz", *k));
             }
+            r.true_pid = 0;
+            r.true_px = r.true_py = r.true_pz = r.true_vz = fnan;
+            if (const int mi = mc_of[static_cast<std::size_t>(i)]; mi >= 0 && mi < mc_rows) {
+                r.true_pid = mc.get<int>("pid", mi);
+                r.true_px = static_cast<Float_t>(mc.get<double>("px", mi));
+                r.true_py = static_cast<Float_t>(mc.get<double>("py", mi));
+                r.true_pz = static_cast<Float_t>(mc.get<double>("pz", mi));
+                r.true_vz = static_cast<Float_t>(mc.get<double>("vz", mi));
+            }
             rows.push_back(r);
         }
         if (rows.empty()) return;
 
         // Copy into the branch buffers and Fill.
         event = static_cast<Long64_t>(event_idx);
+        run = rn;
         raster_x = ras_x;
         raster_y = ras_y;
         for (const row& r : rows) {
@@ -235,11 +287,58 @@ struct particle_dumper {
             dc3_cx = r.dc3_cx;
             dc3_cy = r.dc3_cy;
             dc3_cz = r.dc3_cz;
+            true_pid = r.true_pid;
+            true_px = r.true_px;
+            true_py = r.true_py;
+            true_pz = r.true_pz;
+            true_vz = r.true_vz;
             tree->Fill();
             ++n_particles;
         }
     }
 };
+
+// Read RUN::config (run number + field scales, negated into our convention) and,
+// when a CCDB snapshot is given, the beam offset + solenoid z-shift for that run.
+// Packaged for saving into the output file; vz-swim-hist reads it back.
+auto compute_run_meta(const std::string& src_file, const std::string& ccdb_path) -> vz::run_meta {
+    vz::run_meta m;
+    if (auto fr = hipo::file::open(src_file)) {
+        hipo::file& f = *fr;
+        if (auto cfg = f.bank("RUN::config")) {
+            const std::uint64_t n = std::min<std::uint64_t>(100, f.event_count());
+            for (std::uint64_t i = 0; i < n; ++i) {
+                auto ev = f.event_at(i);
+                if (!ev) continue;
+                hipo::bank_view c = ev->get(*cfg);
+                if (c.rows() > 0) {
+                    m.run = c.get<int>("run", 0);
+                    m.torus_scale = -c.get<double>("torus", 0);
+                    m.solenoid_scale = -c.get<double>("solenoid", 0);
+                    break;
+                }
+            }
+        }
+    }
+    if (ccdb_path.empty()) return m;
+    try {
+        ccdb::reader db(ccdb_path);
+        // Column names vary between snapshots; try the common spellings.
+        const auto first = [&](const std::string& path,
+                               std::initializer_list<const char*> cols) -> std::optional<double> {
+            for (const char* col : cols)
+                if (auto v = db.value(path, m.run, col)) return v;
+            return std::nullopt;
+        };
+        if (auto v = first("/geometry/beam/position", {"x", "x_offset"})) m.beam_x = *v;
+        if (auto v = first("/geometry/beam/position", {"y", "y_offset"})) m.beam_y = *v;
+        if (auto v = first("/geometry/shifts/solenoid", {"z", "z_shift", "dz"}))
+            m.solenoid_z_shift = *v;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "warning: CCDB lookup failed (%s); using defaults\n", e.what());
+    }
+    return m;
+}
 
 // One single-threaded pass over `paths`: dump every REC::Particle row into a
 // flat TTree in args.output. In worker mode the chatter is suppressed (the
@@ -295,6 +394,9 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
     dumper.rec_particle = bank_index("REC::Particle");
     dumper.rec_traj = bank_index("REC::Traj");
     dumper.raster_pos = bank_index("RASTER::position");
+    dumper.run_config = bank_index("RUN::config");
+    dumper.mc_particle = bank_index("MC::Particle");
+    dumper.mc_recmatch = bank_index("MC::RecMatch");
     dumper.tree = &tree;
     tree.Branch("event", &dumper.event, "event/L");
     tree.Branch("pid", &dumper.pid, "pid/I");
@@ -317,10 +419,19 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
     tree.Branch("dc3_cz", &dumper.dc3_cz, "dc3_cz/F");
     tree.Branch("raster_x", &dumper.raster_x, "raster_x/F");
     tree.Branch("raster_y", &dumper.raster_y, "raster_y/F");
+    tree.Branch("run", &dumper.run, "run/I");
+    tree.Branch("true_pid", &dumper.true_pid, "true_pid/I");
+    tree.Branch("true_px", &dumper.true_px, "true_px/F");
+    tree.Branch("true_py", &dumper.true_py, "true_py/F");
+    tree.Branch("true_pz", &dumper.true_pz, "true_pz/F");
+    tree.Branch("true_vz", &dumper.true_vz, "true_vz/F");
 
     ch.process(banks, dumper, 100.0);
 
     tree.Write();
+    // The final (single, non-worker) file carries the run + CCDB metadata; worker
+    // part files do not, so it is written once into the merged supervisor output.
+    if (!worker_mode) compute_run_meta(paths[0], args.ccdb).write(fout);
     fout.Close();
 
     if (!worker_mode) fmt::print("wrote {} particles to {}\n", dumper.n_particles, args.output);
@@ -379,10 +490,15 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
 
+    // Write the run + CCDB metadata into the merged file, and read back the total.
     long long total = 0;
     {
-        TFile f(args.output.c_str());
-        if (auto* t = dynamic_cast<TTree*>(f.Get("particles"))) total = t->GetEntries();
+        TFile f(args.output.c_str(), "UPDATE");
+        if (!f.IsZombie()) {
+            compute_run_meta(paths[0], args.ccdb).write(f);
+            if (auto* t = dynamic_cast<TTree*>(f.Get("particles"))) total = t->GetEntries();
+            f.Close();
+        }
     }
     fmt::print("wrote {} particles to {}\n", total, args.output);
     return 0;
@@ -409,6 +525,7 @@ auto main(int argc, char** argv) -> int {
     args.run_config = p.get<bool>("--run-config");
     args.quiet = p.get<bool>("--quiet");
     args.worker = p.get<bool>("--worker");
+    args.ccdb = p.get<std::string>("--ccdb");
 
     // --run-config: just report each input's RUN::config (run number, torus and
     // solenoid scale factors) without producing a tree.
