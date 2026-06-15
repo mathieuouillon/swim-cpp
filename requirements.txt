@@ -2,6 +2,7 @@
 #   pip install -r requirements.txt
 uproot
 numpy
+scipy
 matplotlib
 mplhep>=1.2.0
 # Optional: nicer style (mathtext, no LaTeX needed) and a progress bar.

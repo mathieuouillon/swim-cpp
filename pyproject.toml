@@ -9,6 +9,7 @@ dependencies = [
     "mplhep>=1.2.0",
     "numpy>=1.26",
     "scienceplots>=2.2.1",
+    "scipy>=1.11",
     "tqdm>=4.66",
     "uproot>=5.3",
 ]
