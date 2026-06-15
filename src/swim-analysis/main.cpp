@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -50,6 +51,8 @@ struct cli_args {
     // Hidden: set by the supervisor on each worker re-exec. Non-empty => this
     // process is a worker — stay silent and write its counts sidecar here.
     std::string emit_counts;
+    long long record_begin = -1;  // hidden: worker's global HIPO record range [begin, end)
+    long long record_end = -1;
 };
 
 // Build the command-line parser (external/argparse). Hidden flags (--emit-counts)
@@ -79,6 +82,8 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--solenoid-scale").default_value(-1.0).help("solenoid field scale");
     p.add_argument("--solenoid-z-shift").default_value(-3.0).help("solenoid map z-shift [cm]");
     p.add_argument("--emit-counts").default_value("").hidden();  // worker counts sidecar path
+    p.add_argument("--record-begin").default_value(static_cast<long long>(-1)).hidden();
+    p.add_argument("--record-end").default_value(static_cast<long long>(-1)).hidden();
     return p;
 }
 
@@ -255,7 +260,12 @@ auto run_worker(const cli_args& args, const std::vector<std::string>& paths, boo
 
     vz::analysis result;
     event_filler filler{&result, &idx, &field};
-    ch.process(banks, filler, 100.0);
+    const std::size_t rec_begin =
+        args.record_begin >= 0 ? static_cast<std::size_t>(args.record_begin) : 0;
+    const std::size_t rec_end = args.record_end >= 0
+                                    ? static_cast<std::size_t>(args.record_end)
+                                    : std::numeric_limits<std::size_t>::max();
+    ch.process(banks, filler, rec_begin, rec_end);
 
     try {
         result.write(args.output);
@@ -280,14 +290,30 @@ auto run_worker(const cli_args& args, const std::vector<std::string>& paths, boo
     return 0;
 }
 
-// Supervisor: shard `paths` round-robin across `n_workers` re-exec'd workers,
-// wait for them, merge their partial ROOT files into args.output, and print the
-// summed summary. Returns the process exit code.
+// Supervisor: split the work across `jobs` re-exec'd workers, merge their partial
+// ROOT files into args.output, and print the summed summary. With at least `jobs`
+// input files each worker takes a subset; with fewer (e.g. a single big file) the
+// work is sharded by HIPO record range so one file still parallelizes.
 auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::string>& paths,
-                    int n_workers) -> int {
-    std::vector<std::vector<std::string>> shards(static_cast<std::size_t>(n_workers));
-    for (std::size_t i = 0; i < paths.size(); ++i)
-        shards[i % static_cast<std::size_t>(n_workers)].push_back(paths[i]);
+                    int jobs) -> int {
+    const bool by_file = paths.size() >= static_cast<std::size_t>(jobs);
+
+    int n_workers = jobs;
+    std::uint64_t total_records = 0;
+    if (!by_file) {
+        vz::chain probe(/*progress=*/false, /*verbose=*/false);
+        for (const auto& p : paths) probe.add(p);
+        try {
+            probe.open(/*validate_all=*/true);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: could not open inputs: %s\n", e.what());
+            return 1;
+        }
+        total_records = probe.total_records();
+        n_workers = static_cast<int>(std::min<std::uint64_t>(
+            static_cast<std::uint64_t>(jobs), std::max<std::uint64_t>(1, total_records)));
+        if (n_workers <= 1) return run_worker(args, paths, /*worker_mode=*/false);
+    }
 
     const std::string exe = vz::self_exe_path(argv[0]);
     std::string dir;
@@ -298,27 +324,50 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
         return 1;
     }
 
+    // Record sharding hands every worker the full input list (one shared @list)
+    // plus a disjoint global record range; file sharding gives each its own list.
+    std::string shared_list;
+    if (!by_file) {
+        shared_list = fmt::format("{}/inputs.list", dir);
+        std::ofstream lf(shared_list);
+        for (const auto& p : paths) lf << p << '\n';
+    }
+    const std::uint64_t chunk = by_file ? 0 : (total_records + n_workers - 1) / n_workers;
+
     std::vector<std::string> parts, counts;
     std::vector<std::vector<std::string>> argvs;
     for (int i = 0; i < n_workers; ++i) {
-        const std::string list = fmt::format("{}/shard-{:03}.list", dir, i);
         const std::string part = fmt::format("{}/part-{:03}.root", dir, i);
         const std::string cnt = fmt::format("{}/part-{:03}.counts", dir, i);
-        {
-            std::ofstream lf(list);
-            for (const auto& p : shards[static_cast<std::size_t>(i)]) lf << p << '\n';
-        }
         parts.push_back(part);
         counts.push_back(cnt);
-        argvs.push_back({exe, "--jobs", "1", "--quiet", "--output", part, "--emit-counts", cnt,
-                         "--torus", args.torus, "--solenoid", args.solenoid, "--torus-scale",
-                         fmt::format("{}", args.torus_scale), "--solenoid-scale",
-                         fmt::format("{}", args.solenoid_scale), "--solenoid-z-shift",
-                         fmt::format("{}", args.solenoid_z_shift), "@" + list});
+        std::vector<std::string> av = {exe, "--jobs", "1", "--quiet", "--output", part,
+                                       "--emit-counts", cnt, "--torus", args.torus, "--solenoid",
+                                       args.solenoid, "--torus-scale",
+                                       fmt::format("{}", args.torus_scale), "--solenoid-scale",
+                                       fmt::format("{}", args.solenoid_scale), "--solenoid-z-shift",
+                                       fmt::format("{}", args.solenoid_z_shift)};
+        if (by_file) {
+            const std::string list = fmt::format("{}/shard-{:03}.list", dir, i);
+            std::ofstream lf(list);
+            for (std::size_t j = i; j < paths.size(); j += static_cast<std::size_t>(n_workers))
+                lf << paths[j] << '\n';
+            av.push_back("@" + list);
+        } else {
+            const std::uint64_t rb = static_cast<std::uint64_t>(i) * chunk;
+            const std::uint64_t re = std::min<std::uint64_t>(rb + chunk, total_records);
+            av.insert(av.end(), {"--record-begin", fmt::format("{}", rb), "--record-end",
+                                 fmt::format("{}", re)});
+            av.push_back("@" + shared_list);
+        }
+        argvs.push_back(std::move(av));
     }
 
-    fmt::print("swim-analysis: {} worker process(es) over {} file(s) -> {}\n", n_workers,
-               paths.size(), args.output);
+    fmt::print("swim-analysis: {} worker process(es) sharded by {} over {} -> {}\n", n_workers,
+               by_file ? "file" : "record",
+               by_file ? fmt::format("{} file(s)", paths.size())
+                       : fmt::format("{} records in {} file(s)", total_records, paths.size()),
+               args.output);
 
     if (!vz::run_workers(argvs)) {
         std::fprintf(stderr, "error: one or more workers failed; '%s' not written\n",
@@ -381,6 +430,8 @@ auto main(int argc, char** argv) -> int {
     args.solenoid_scale = p.get<double>("--solenoid-scale");
     args.solenoid_z_shift = p.get<double>("--solenoid-z-shift");
     args.emit_counts = p.get<std::string>("--emit-counts");
+    args.record_begin = p.get<long long>("--record-begin");
+    args.record_end = p.get<long long>("--record-end");
 
     std::vector<std::string> paths = collect_inputs(args.inputs);
     if (paths.empty()) {
@@ -391,13 +442,14 @@ auto main(int argc, char** argv) -> int {
     const bool worker_mode = !args.emit_counts.empty();
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const int want = args.jobs > 0 ? args.jobs : static_cast<int>(hw);
-    const int n_workers = std::min(want, static_cast<int>(paths.size()));
 
     // Ensure the output directory (default output/cpp/) exists before any write.
     vz::ensure_parent_dir(args.output);
 
-    // A worker, or any run that resolves to a single shard, processes in-process
-    // (no point forking one worker). Otherwise supervise N re-exec'd workers.
-    if (worker_mode || n_workers <= 1) return run_worker(args, paths, worker_mode);
-    return run_supervisor(args, argv, paths, n_workers);
+    // A re-exec'd worker processes its assigned files / record range. A lone run
+    // processes everything. Otherwise the supervisor splits across `want` workers
+    // — by file when there are enough, else by HIPO record range (one big file).
+    if (worker_mode) return run_worker(args, paths, /*worker_mode=*/true);
+    if (want <= 1) return run_worker(args, paths, /*worker_mode=*/false);
+    return run_supervisor(args, argv, paths, want);
 }

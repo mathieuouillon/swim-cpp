@@ -51,6 +51,8 @@ struct cli_args {
     bool worker = false;      // hidden: set by the supervisor on each re-exec
     std::string ccdb;         // CCDB sqlite snapshot; empty = skip the CCDB lookup
     std::string ccdb_variation = "default";  // CCDB variation for the lookup
+    long long record_begin = -1;  // hidden: worker's global HIPO record range [begin, end)
+    long long record_end = -1;
 };
 
 // Build the command-line parser (external/argparse). --worker is a hidden marker
@@ -81,6 +83,8 @@ auto build_parser() -> argparse::parser {
               "solenoid z-shift in particular is variation-dependent");
     p.add_argument("-q", "--quiet").flag().help("suppress the progress bar");
     p.add_argument("--worker").flag().hidden();  // re-exec'd worker marker
+    p.add_argument("--record-begin").default_value(static_cast<long long>(-1)).hidden();
+    p.add_argument("--record-end").default_value(static_cast<long long>(-1)).hidden();
     return p;
 }
 
@@ -432,7 +436,12 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
     tree.Branch("true_pz", &dumper.true_pz, "true_pz/F");
     tree.Branch("true_vz", &dumper.true_vz, "true_vz/F");
 
-    ch.process(banks, dumper, 100.0);
+    const std::size_t rec_begin =
+        args.record_begin >= 0 ? static_cast<std::size_t>(args.record_begin) : 0;
+    const std::size_t rec_end = args.record_end >= 0
+                                    ? static_cast<std::size_t>(args.record_end)
+                                    : std::numeric_limits<std::size_t>::max();
+    ch.process(banks, dumper, rec_begin, rec_end);
 
     tree.Write();
     // The final (single, non-worker) file carries the run + CCDB metadata; worker
@@ -444,16 +453,30 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
     return 0;
 }
 
-// Supervisor: shard `paths` round-robin across `n_workers` re-exec'd workers,
-// merge their partial TTrees into args.output, and report the total. (With
-// --jobs>1 the per-row `event` index is per-worker, not globally unique; that
-// branch is diagnostic and unused downstream — run --jobs 1 if you need it
-// global.)
+// Supervisor: split the work across `jobs` re-exec'd workers and merge their
+// partial TTrees into args.output. With at least `jobs` input files each worker
+// takes a subset of files; with fewer (e.g. a single big train file) the work
+// is sharded by HIPO record range instead, so one file still parallelizes.
 auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::string>& paths,
-                    int n_workers) -> int {
-    std::vector<std::vector<std::string>> shards(static_cast<std::size_t>(n_workers));
-    for (std::size_t i = 0; i < paths.size(); ++i)
-        shards[i % static_cast<std::size_t>(n_workers)].push_back(paths[i]);
+                    int jobs) -> int {
+    const bool by_file = paths.size() >= static_cast<std::size_t>(jobs);
+
+    int n_workers = jobs;
+    std::uint64_t total_records = 0;
+    if (!by_file) {
+        vz::chain probe(/*progress=*/false, /*verbose=*/false);
+        for (const auto& p : paths) probe.add(p);
+        try {
+            probe.open(/*validate_all=*/true);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: could not open inputs: %s\n", e.what());
+            return 1;
+        }
+        total_records = probe.total_records();
+        n_workers = static_cast<int>(std::min<std::uint64_t>(
+            static_cast<std::uint64_t>(jobs), std::max<std::uint64_t>(1, total_records)));
+        if (n_workers <= 1) return run_dump(args, paths, /*worker_mode=*/false);  // nothing to split
+    }
 
     const std::string exe = vz::self_exe_path(argv[0]);
     std::string dir;
@@ -466,15 +489,28 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
 
     std::vector<std::string> parts;
     std::vector<std::vector<std::string>> argvs;
+    const std::uint64_t chunk = by_file ? 0 : (total_records + n_workers - 1) / n_workers;
     for (int i = 0; i < n_workers; ++i) {
         const std::string part = fmt::format("{}/part-{:03}.root", dir, i);
         parts.push_back(part);
         std::vector<std::string> av = {exe, "--jobs", "1", "--worker", "--quiet", "--output", part};
-        for (const auto& p : shards[static_cast<std::size_t>(i)]) av.push_back(p);
+        if (by_file) {
+            for (std::size_t j = i; j < paths.size(); j += static_cast<std::size_t>(n_workers))
+                av.push_back(paths[j]);
+        } else {
+            const std::uint64_t rb = static_cast<std::uint64_t>(i) * chunk;
+            const std::uint64_t re = std::min<std::uint64_t>(rb + chunk, total_records);
+            av.insert(av.end(), {"--record-begin", fmt::format("{}", rb), "--record-end",
+                                 fmt::format("{}", re)});
+            for (const auto& p : paths) av.push_back(p);
+        }
         argvs.push_back(std::move(av));
     }
 
-    fmt::print("hipo2root: {} worker process(es) over {} file(s) -> {}\n", n_workers, paths.size(),
+    fmt::print("hipo2root: {} worker process(es) sharded by {} over {} -> {}\n", n_workers,
+               by_file ? "file" : "record",
+               by_file ? fmt::format("{} file(s)", paths.size())
+                       : fmt::format("{} records in {} file(s)", total_records, paths.size()),
                args.output);
     print_run_config(paths[0]);
 
@@ -533,6 +569,8 @@ auto main(int argc, char** argv) -> int {
     args.worker = p.get<bool>("--worker");
     args.ccdb = p.get<std::string>("--ccdb");
     args.ccdb_variation = p.get<std::string>("--ccdb-variation");
+    args.record_begin = p.get<long long>("--record-begin");
+    args.record_end = p.get<long long>("--record-end");
 
     // --run-config: just report each input's RUN::config (run number, torus and
     // solenoid scale factors) without producing a tree.
@@ -555,13 +593,13 @@ auto main(int argc, char** argv) -> int {
 
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const int want = args.jobs > 0 ? args.jobs : static_cast<int>(hw);
-    const int n_workers = std::min(want, static_cast<int>(args.inputs.size()));
-
     // Ensure the output directory (default output/cpp/) exists before any write.
     vz::ensure_parent_dir(args.output);
 
-    // A worker, or any run resolving to a single shard, dumps in-process;
-    // otherwise supervise N re-exec'd workers.
-    if (args.worker || n_workers <= 1) return run_dump(args, args.inputs, args.worker);
-    return run_supervisor(args, argv, args.inputs, n_workers);
+    // A re-exec'd worker dumps its assigned files / record range. A lone run dumps
+    // everything. Otherwise the supervisor splits across `want` workers — by file
+    // when there are enough, else by HIPO record range so one file parallelizes.
+    if (args.worker) return run_dump(args, args.inputs, /*worker_mode=*/true);
+    if (want <= 1) return run_dump(args, args.inputs, /*worker_mode=*/false);
+    return run_supervisor(args, argv, args.inputs, want);
 }

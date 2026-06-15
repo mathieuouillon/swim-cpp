@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -78,10 +79,11 @@ class chain {
         files_.clear();
         file_event_offset_.clear();
         total_events_ = 0;
+        total_records_ = 0;
         files_.reserve(paths_.size());
         for (const auto& p : paths_) {
             // prefetch_records = 0: no background decode pipeline — we drive
-            // records ourselves across the worker threads via read_record.
+            // records ourselves via read_record.
             hipo::read_options opt;
             opt.prefetch_records = 0;
             auto f = hipo::file::open(p, opt);
@@ -89,6 +91,7 @@ class chain {
                 throw std::runtime_error(fmt::format("cannot open '{}': {}", p, f.error().message));
             file_event_offset_.push_back(total_events_);
             total_events_ += f->event_count();
+            total_records_ += f->record_count();
             files_.push_back(std::move(*f));
         }
         if (files_.empty()) throw std::runtime_error("chain: no files to open");
@@ -98,6 +101,9 @@ class chain {
     [[nodiscard]] auto total_events() const noexcept -> long long {
         return static_cast<long long>(total_events_);
     }
+    /// Total HIPO records across all files — the unit a single big file is
+    /// sharded by so it can be parallelized across worker processes.
+    [[nodiscard]] auto total_records() const noexcept -> std::uint64_t { return total_records_; }
 
     /// Builds the banklist template for `names`. Every name must exist in the
     /// first file's dictionary (callers pre-filter with present-bank lists);
@@ -113,24 +119,22 @@ class chain {
         return bl;
     }
 
-    /// Folds every event (or the first `percentage`% of them) through `func`,
-    /// called once per event as `func(bank_list& bl, int file_idx, long
-    /// event_idx)`, where event_idx is the stable global event index. The loop
-    /// is serial (one record_data, one bank_list) — parallelism is across
-    /// processes, each chain holding a disjoint shard of the files.
+    /// Folds every event of the global record range [rec_begin, rec_end) through
+    /// `func`, called once per event as `func(bank_list& bl, int file_idx, long
+    /// event_idx)` with `event_idx` the stable global event index. Records are
+    /// numbered consecutively across all files, so a single big file is sharded
+    /// across worker processes by handing each a disjoint record range; the
+    /// default range is everything. The loop is serial (one record_data, one
+    /// bank_list); records outside the range are not even read.
     template <class F>
-    auto process(const bank_list& banks, F&& func, double percentage = 100.0) -> void {
+    auto process(const bank_list& banks, F&& func, std::size_t rec_begin = 0,
+                 std::size_t rec_end = std::numeric_limits<std::size_t>::max()) -> void {
         if (files_.empty()) return;
-        percentage = std::clamp(percentage, 0.0, 100.0);
-        const std::uint64_t target =
-            percentage >= 100.0 ? total_events_
-                                : static_cast<std::uint64_t>(
-                                      static_cast<double>(total_events_) * percentage / 100.0);
-        const bool capped = target < total_events_;
 
         if (verbose_)
-            fmt::print("[chain] processing {} of {} events from {} file(s), serial\n", target,
-                       total_events_, files_.size());
+            fmt::print("[chain] processing records [{}, {}) of {} from {} file(s), serial\n",
+                       rec_begin, std::min<std::size_t>(rec_end, total_records_), total_records_,
+                       files_.size());
 
         // Resolve the wanted banks against each file's dictionary once; an empty
         // handle (bank absent in that file) yields an empty view per event,
@@ -143,10 +147,10 @@ class chain {
         }
 
         std::unique_ptr<progress_tracker> bar;
-        if (progress_ && target > 0) {
+        if (progress_ && total_events_ > 0) {
             progress_tracker::config cfg;
             cfg.label = "Processing";
-            bar = std::make_unique<progress_tracker>(target, cfg);
+            bar = std::make_unique<progress_tracker>(total_events_, cfg);
             bar->start();
         }
 
@@ -155,24 +159,28 @@ class chain {
         local.names = banks.names;
         local.views.assign(banks.names.size(), hipo::bank_view{});
 
-        std::uint64_t emitted = 0;
+        std::size_t gr = 0;  // global record index across all files
         try {
-            for (std::size_t fi = 0; fi < files_.size() && (!capped || emitted < target); ++fi) {
+            for (std::size_t fi = 0; fi < files_.size() && gr < rec_end; ++fi) {
                 const hipo::file&                     f       = files_[fi];
                 const std::vector<hipo::bank_handle>& handles = file_handles[fi];
                 const std::uint32_t                   nrec    = f.record_count();
-                for (std::uint32_t rec = 0; rec < nrec && (!capped || emitted < target); ++rec) {
+                if (gr + nrec <= rec_begin) {  // whole file precedes the range
+                    gr += nrec;
+                    continue;
+                }
+                for (std::uint32_t rec = 0; rec < nrec; ++rec, ++gr) {
+                    if (gr < rec_begin) continue;
+                    if (gr >= rec_end) break;
                     if (auto r = f.read_record(rec, rd); !r) continue;  // skip bad record
                     const std::uint64_t event_base =
                         file_event_offset_[fi] + f.record_first_event(rec);
                     const std::uint32_t nev = rd.event_count();
                     for (std::uint32_t e = 0; e < nev; ++e) {
-                        if (capped && emitted >= target) break;
                         const hipo::event_view ev = rd.event(e);
                         for (std::size_t i = 0; i < handles.size(); ++i)
                             local.views[i] = ev.get(handles[i]);
                         func(local, static_cast<int>(fi), static_cast<long>(event_base + e));
-                        ++emitted;
                         if (bar) bar->increment();
                     }
                 }
@@ -192,6 +200,7 @@ class chain {
     std::vector<hipo::file>    files_;
     std::vector<std::uint64_t> file_event_offset_;  // cumulative global event base per file
     std::uint64_t              total_events_ = 0;
+    std::uint64_t              total_records_ = 0;
 };
 
 }  // namespace vz
