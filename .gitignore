@@ -23,5 +23,17 @@ __pycache__/
 *.swp
 *~
 
+# Uv tools 
+/.uv/
+uv.lock
+
 # Local Claude Code tooling config
 /.claude/
+
+# Output figure and results directories
+dc-x_scan/
+dc-z_scan/
+dc-y_scan/
+solenoid*/
+torus*/
+zshift_scan*/

@@ -11,9 +11,9 @@ project(
 
 cpp = meson.get_compiler('cpp')
 
-# hipo4 gates its LZ4 (de)compression behind `#ifdef __LZ4__`; HIPO records are
-# LZ4-compressed, so this must be defined project-wide (before the hipo subdir)
-# or no events can be read. Applied to all TUs so record.h is ABI-consistent.
+# hipo4 gates its LZ4 (de)compression behind `#ifdef __LZ4__` (file.cpp /
+# file_writer.cpp); HIPO records are LZ4-compressed, so this must be defined
+# project-wide (before the hipo subdir) or no events can be read.
 add_project_arguments('-D__LZ4__', language : 'cpp')
 
 # ---- lz4 (needed by hipo4) ------------------------------------------------
@@ -84,6 +84,26 @@ executable(
   'swim-analysis',
   ['src/main.cpp'] + analysis_sources,
   dependencies        : [hipo_dep, root_dep, boost_dep, fmt_dep],
+  include_directories : src_inc,
+  install             : true,
+)
+
+# ---- hipo2root: dump REC::Particle kinematics to a flat ROOT TTree ---------
+executable(
+  'hipo2root',
+  ['src/hipo2root.cpp'],
+  dependencies        : [hipo_dep, root_dep, fmt_dep],
+  include_directories : src_inc,
+  install             : true,
+)
+
+# ---- vz-swim-hist: electron vz in (p,theta) bins with DC-R1 beamline swim --
+# Reads the flat particles.root TTree (no hipo4 library needed); its progress
+# bar is the project-local src/progresstracker.hpp.
+executable(
+  'vz-swim-hist',
+  ['src/vz_swim_hist.cpp', 'src/swim.cpp', 'src/field.cpp'],
+  dependencies        : [root_dep, boost_dep, fmt_dep],
   include_directories : src_inc,
   install             : true,
 )

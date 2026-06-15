@@ -1,11 +1,13 @@
-// Per-detector response-bank readers over a `const hipo::bank*` (nullptr = the
-// bank is absent in this run, the C++ analog of Rust's `Option<&Bank>`). Banks
-// may have several rows per particle, so rows are selected by `pindex` plus an
-// optional `detector` and/or `layer`. Port of the helpers in analysis.rs.
+// Per-detector response-bank readers over a `hipo::bank_view` (an empty view —
+// rows()==0 — means the bank is absent in this run/event, the C++ analog of
+// Rust's `Option<&Bank>` being None). Banks may have several rows per particle,
+// so rows are selected by `pindex` plus an optional `detector` and/or `layer`.
+// Port of the helpers in analysis.rs.
 //
-// Column reads use hipo::bank::getInt (promotes Byte/Short/Int) and getDouble
-// (handles Float and Double) — matching the Rust RowView i32()/f64() getters
-// that convert across the stored wire width.
+// Column reads use the new hipo4 convert-on-read getter bank_view::get<int>
+// (promotes Byte/Short/Int) and get<double> (handles Float and Double) —
+// matching the Rust RowView i32()/f64() getters that convert across the stored
+// wire width.
 #pragma once
 
 #include <algorithm>
@@ -16,56 +18,56 @@
 #include <optional>
 
 #include "constants.hpp"
-#include "hipo4/bank.h"
+#include "hipo4/hipo.hpp"
 
 namespace vz {
 
 inline constexpr double DNAN = std::numeric_limits<double>::quiet_NaN();
 
 /// Row index of the first row matching `pindex` (and `det`/`layer` when given).
-inline std::optional<int> match_row(const hipo::bank* bank, int pindex, std::optional<int> det,
+inline std::optional<int> match_row(hipo::bank_view bank, int pindex, std::optional<int> det,
                                     std::optional<int> layer) {
     if (!bank) return std::nullopt;
-    const int n = bank->getRows();
+    const int n = static_cast<int>(bank.rows());
     for (int k = 0; k < n; ++k) {
-        if (bank->getInt("pindex", k) != pindex) continue;
-        if (det && bank->getInt("detector", k) != *det) continue;
-        if (layer && bank->getInt("layer", k) != *layer) continue;
+        if (bank.get<int>("pindex", k) != pindex) continue;
+        if (det && bank.get<int>("detector", k) != *det) continue;
+        if (layer && bank.get<int>("layer", k) != *layer) continue;
         return k;
     }
     return std::nullopt;
 }
 
 /// Float column from the first row matching `pindex` (+ optional `det`).
-inline std::optional<double> first_f64(const hipo::bank* bank, int pindex, std::optional<int> det,
+inline std::optional<double> first_f64(hipo::bank_view bank, int pindex, std::optional<int> det,
                                        const char* col) {
     if (!bank) return std::nullopt;
     auto k = match_row(bank, pindex, det, std::nullopt);
     if (!k) return std::nullopt;
-    return bank->getDouble(col, *k);
+    return bank.get<double>(col, *k);
 }
 
 /// Float column at a specific `det` + `layer` for `pindex`.
-inline std::optional<double> layer_f64(const hipo::bank* bank, int pindex, int det, int layer,
+inline std::optional<double> layer_f64(hipo::bank_view bank, int pindex, int det, int layer,
                                        const char* col) {
     if (!bank) return std::nullopt;
     auto k = match_row(bank, pindex, det, layer);
     if (!k) return std::nullopt;
-    return bank->getDouble(col, *k);
+    return bank.get<double>(col, *k);
 }
 
 /// Sum of a float column over all rows matching `pindex` (+ optional `det`);
 /// nullopt if no row matched (distinguishes "absent" from "zero deposit").
-inline std::optional<double> sum_f64(const hipo::bank* bank, int pindex, std::optional<int> det,
+inline std::optional<double> sum_f64(hipo::bank_view bank, int pindex, std::optional<int> det,
                                      const char* col) {
     if (!bank) return std::nullopt;
     double sum = 0.0;
     bool found = false;
-    const int n = bank->getRows();
+    const int n = static_cast<int>(bank.rows());
     for (int k = 0; k < n; ++k) {
-        if (bank->getInt("pindex", k) != pindex) continue;
-        if (det && bank->getInt("detector", k) != *det) continue;
-        sum += bank->getDouble(col, k);
+        if (bank.get<int>("pindex", k) != pindex) continue;
+        if (det && bank.get<int>("detector", k) != *det) continue;
+        sum += bank.get<double>(col, k);
         found = true;
     }
     if (!found) return std::nullopt;
@@ -84,7 +86,7 @@ struct CovRes {
     double sigphi;
 };
 
-inline CovRes covariance_resolutions(const hipo::bank* cov, int pindex, double p, double px,
+inline CovRes covariance_resolutions(hipo::bank_view cov, int pindex, double p, double px,
                                      double py, double pz) {
     const double nan = DNAN;
     auto c33o = first_f64(cov, pindex, std::nullopt, "C33");
@@ -129,23 +131,23 @@ struct PosMom {
 /// True (position [cm], momentum [GeV]) of the primary `target_pid` at its first
 /// DC hit (detector==DC, mpid==0, lowest avgT). MC::True positions avgX/Y/Z are
 /// mm -> /10 cm, momenta MeV -> /1000 GeV.
-inline std::optional<PosMom> mc_true_dc_state(const hipo::bank* mctrue, int target_pid) {
+inline std::optional<PosMom> mc_true_dc_state(hipo::bank_view mctrue, int target_pid) {
     if (!mctrue) return std::nullopt;
     double best_t = std::numeric_limits<double>::infinity();
     std::optional<PosMom> best;
-    const int n = mctrue->getRows();
+    const int n = static_cast<int>(mctrue.rows());
     for (int k = 0; k < n; ++k) {
-        if (mctrue->getInt("detector", k) != DET_DC) continue;
-        if (mctrue->getInt("mpid", k) != 0) continue;
-        if (mctrue->getInt("pid", k) != target_pid) continue;
-        const double t = mctrue->getDouble("avgT", k);
+        if (mctrue.get<int>("detector", k) != DET_DC) continue;
+        if (mctrue.get<int>("mpid", k) != 0) continue;
+        if (mctrue.get<int>("pid", k) != target_pid) continue;
+        const double t = mctrue.get<double>("avgT", k);
         if (t < best_t) {
             best_t = t;
             PosMom pm;
-            pm.pos = {mctrue->getDouble("avgX", k) / 10.0, mctrue->getDouble("avgY", k) / 10.0,
-                      mctrue->getDouble("avgZ", k) / 10.0};
-            pm.mom = {mctrue->getDouble("px", k) / 1000.0, mctrue->getDouble("py", k) / 1000.0,
-                      mctrue->getDouble("pz", k) / 1000.0};
+            pm.pos = {mctrue.get<double>("avgX", k) / 10.0, mctrue.get<double>("avgY", k) / 10.0,
+                      mctrue.get<double>("avgZ", k) / 10.0};
+            pm.mom = {mctrue.get<double>("px", k) / 1000.0, mctrue.get<double>("py", k) / 1000.0,
+                      mctrue.get<double>("pz", k) / 1000.0};
             best = pm;
         }
     }
@@ -155,15 +157,15 @@ inline std::optional<PosMom> mc_true_dc_state(const hipo::bank* mctrue, int targ
 /// Reconstructed (position [cm], momentum [GeV]) at DC region 1 from REC::Traj:
 /// the row with detector==DC, layer==DC_LAYERS[0]. Position is already cm; the
 /// momentum is the (cx,cy,cz) cosines scaled by the reconstructed |p|.
-inline std::optional<PosMom> rec_traj_dc_state(const hipo::bank* traj, int pindex, double p) {
+inline std::optional<PosMom> rec_traj_dc_state(hipo::bank_view traj, int pindex, double p) {
     if (!traj) return std::nullopt;
     auto k = match_row(traj, pindex, DET_DC, DC_LAYERS[0]);
     if (!k) return std::nullopt;
     PosMom pm;
-    pm.pos = {traj->getDouble("x", *k), traj->getDouble("y", *k), traj->getDouble("z", *k)};
-    const double cx = traj->getDouble("cx", *k);
-    const double cy = traj->getDouble("cy", *k);
-    const double cz = traj->getDouble("cz", *k);
+    pm.pos = {traj.get<double>("x", *k), traj.get<double>("y", *k), traj.get<double>("z", *k)};
+    const double cx = traj.get<double>("cx", *k);
+    const double cy = traj.get<double>("cy", *k);
+    const double cz = traj.get<double>("cz", *k);
     pm.mom = {p * cx, p * cy, p * cz};
     return pm;
 }

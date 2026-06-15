@@ -27,9 +27,9 @@ constexpr std::size_t idx_res(std::size_t rv, std::size_t t, std::size_t r, std:
     return ((rv * N_SPECIES + t) * N_SPECIES + r) * N_MOM_BINS + b;
 }
 
-// Bank index -> pointer (nullptr if absent), reproducing Rust's Option<&Bank>.
-const hipo::bank* bp(const hipo::banklist& bl, long i) {
-    return i < 0 ? nullptr : &bl[static_cast<std::size_t>(i)];
+// Bank index -> view (empty view if absent), reproducing Rust's Option<&Bank>.
+hipo::bank_view bp(const BankList& bl, long i) {
+    return i < 0 ? hipo::bank_view{} : bl[i];
 }
 
 void mk1(std::vector<std::unique_ptr<TH1D>>& v, const std::string& name, const std::string& title,
@@ -43,10 +43,10 @@ void mk2(std::vector<std::unique_ptr<TH2D>>& v, const std::string& name, const s
 
 }  // namespace
 
-BankIndex::BankIndex(hipo::banklist& bl) {
+BankIndex::BankIndex(BankList& bl) {
     auto g = [&](const char* n) -> long {
         try {
-            return static_cast<long>(hipo::getBanklistIndex(bl, n));
+            return getBanklistIndex(bl, n);
         } catch (const std::exception&) {
             return -1;
         }
@@ -233,67 +233,67 @@ Analysis::Analysis() {
     }
 }
 
-void Analysis::fill_event(const hipo::banklist& bl, const BankIndex& bi, const Field& field) {
+void Analysis::fill_event(const BankList& bl, const BankIndex& bi, const Field& field) {
     events_ += 1;
 
-    const hipo::bank* rec = bp(bl, bi.rec_particle);
-    const hipo::bank* mc = bp(bl, bi.mc_particle);
-    const hipo::bank* mtch = bp(bl, bi.mc_recmatch);
+    hipo::bank_view rec = bp(bl, bi.rec_particle);
+    hipo::bank_view mc = bp(bl, bi.mc_particle);
+    hipo::bank_view mtch = bp(bl, bi.mc_recmatch);
     if (!rec || !mc || !mtch) return;
 
-    const hipo::bank* trk = bp(bl, bi.rec_track);
-    const hipo::bank* traj = bp(bl, bi.rec_traj);
-    const hipo::bank* cov = bp(bl, bi.rec_covmat);
-    const hipo::bank* scint = bp(bl, bi.rec_scint);
-    const hipo::bank* scintx = bp(bl, bi.rec_scintx);
-    const hipo::bank* cher = bp(bl, bi.rec_cher);
-    const hipo::bank* calo = bp(bl, bi.rec_calo);
-    const hipo::bank* mctrue = bp(bl, bi.mc_true);
+    hipo::bank_view trk = bp(bl, bi.rec_track);
+    hipo::bank_view traj = bp(bl, bi.rec_traj);
+    hipo::bank_view cov = bp(bl, bi.rec_covmat);
+    hipo::bank_view scint = bp(bl, bi.rec_scint);
+    hipo::bank_view scintx = bp(bl, bi.rec_scintx);
+    hipo::bank_view cher = bp(bl, bi.rec_cher);
+    hipo::bank_view calo = bp(bl, bi.rec_calo);
+    hipo::bank_view mctrue = bp(bl, bi.mc_true);
 
-    const int rec_rows = rec->getRows();
-    const int mc_rows = mc->getRows();
+    const int rec_rows = static_cast<int>(rec.rows());
+    const int mc_rows = static_cast<int>(mc.rows());
 
     // Generated-momentum spectrum: every primary pion in MC::Particle, with no
     // reconstruction / FD / DC requirement (acceptance cross-check).
     for (int i = 0; i < mc_rows; ++i) {
-        auto s = species_index(mc->getInt("pid", i));
+        auto s = species_index(mc.get<int>("pid", i));
         if (!s) continue;
         if (*s < N_PION_SPECIES) {
-            double gx = mc->getDouble("px", i);
-            double gy = mc->getDouble("py", i);
-            double gz = mc->getDouble("pz", i);
+            double gx = mc.get<double>("px", i);
+            double gy = mc.get<double>("py", i);
+            double gz = mc.get<double>("pz", i);
             genp_[*s]->Fill(std::sqrt(gx * gx + gy * gy + gz * gz));
         }
     }
 
-    const int mtch_rows = mtch->getRows();
+    const int mtch_rows = static_cast<int>(mtch.rows());
     for (int m = 0; m < mtch_rows; ++m) {
-        const int pindex = mtch->getInt("pindex", m);
-        const int mcindex = mtch->getInt("mcindex", m);
+        const int pindex = mtch.get<int>("pindex", m);
+        const int mcindex = mtch.get<int>("mcindex", m);
         if (pindex < 0 || pindex >= rec_rows) continue;
         if (mcindex < 0 || mcindex >= mc_rows) continue;
 
-        const int truth_pid = mc->getInt("pid", mcindex);
+        const int truth_pid = mc.get<int>("pid", mcindex);
         auto truth_o = species_index(truth_pid);
         if (!truth_o) continue;
-        auto reco_o = species_index(rec->getInt("pid", pindex));
+        auto reco_o = species_index(rec.get<int>("pid", pindex));
         if (!reco_o) continue;
         const std::size_t truth = *truth_o;
         const std::size_t reco = *reco_o;
 
         // Forward Detector only (reconstructed-track region).
-        if (!is_forward(rec->getInt("status", pindex))) continue;
+        if (!is_forward(rec.get<int>("status", pindex))) continue;
 
-        const double px = rec->getDouble("px", pindex);
-        const double py = rec->getDouble("py", pindex);
-        const double pz = rec->getDouble("pz", pindex);
+        const double px = rec.get<double>("px", pindex);
+        const double py = rec.get<double>("py", pindex);
+        const double pz = rec.get<double>("pz", pindex);
         const double p = std::sqrt(px * px + py * py + pz * pz);
         if (p < MOM_MIN || p >= MOM_MAX) continue;
         const std::size_t mom_bin = static_cast<std::size_t>((p - MOM_MIN) / MOM_WIDTH);
         if (mom_bin >= N_MOM_BINS) continue;
 
-        const double vz_rec = rec->getDouble("vz", pindex);
-        const double vz_true = mc->getDouble("vz", mcindex);
+        const double vz_rec = rec.get<double>("vz", pindex);
+        const double vz_true = mc.get<double>("vz", mcindex);
 
         vz_[idx_trp(truth, reco, mom_bin)]->Fill(vz_rec);
         vz_true_[idx_trp(truth, reco, mom_bin)]->Fill(vz_true);
@@ -317,9 +317,9 @@ void Analysis::fill_event(const hipo::banklist& bl, const BankIndex& bi, const F
                 const auto& mom_gev = st->mom;
                 const double p_dcr1 = std::sqrt(mom_gev[0] * mom_gev[0] + mom_gev[1] * mom_gev[1] +
                                                 mom_gev[2] * mom_gev[2]);
-                const double pxm = mc->getDouble("px", mcindex);
-                const double pym = mc->getDouble("py", mcindex);
-                const double pzm = mc->getDouble("pz", mcindex);
+                const double pxm = mc.get<double>("px", mcindex);
+                const double pym = mc.get<double>("py", mcindex);
+                const double pzm = mc.get<double>("pz", mcindex);
                 const double p_vtx = std::sqrt(pxm * pxm + pym * pym + pzm * pzm);
                 const double dp = p_vtx - p_dcr1;
                 ptrue_[reco]->Fill(p_vtx, p_dcr1);
@@ -371,11 +371,11 @@ void Analysis::fill_event(const hipo::banklist& bl, const BankIndex& bi, const F
                 double trkchi2 = DNAN;
                 double trkndf = DNAN;
                 if (trk) {
-                    const int tn = trk->getRows();
+                    const int tn = static_cast<int>(trk.rows());
                     for (int k = 0; k < tn; ++k) {
-                        if (trk->getInt("pindex", k) == pindex) {
-                            trkchi2 = trk->getDouble("chi2", k);
-                            trkndf = static_cast<double>(trk->getInt("NDF", k));
+                        if (trk.get<int>("pindex", k) == pindex) {
+                            trkchi2 = trk.get<double>("chi2", k);
+                            trkndf = static_cast<double>(trk.get<int>("NDF", k));
                             break;
                         }
                     }
@@ -384,7 +384,7 @@ void Analysis::fill_event(const hipo::banklist& bl, const BankIndex& bi, const F
                 const double pt = std::sqrt(px * px + py * py);
                 const double phi = std::atan2(py, px) * RAD2DEG;
                 const double trkredchi2 = (trkndf > 0.0) ? trkchi2 / trkndf : DNAN;
-                const double beta_meas = rec->getDouble("beta", pindex);
+                const double beta_meas = rec.get<double>("beta", pindex);
                 const double beta_exp = p / std::sqrt(p * p + PION_MASS * PION_MASS);
                 const double dbeta = beta_meas - beta_exp;
 
@@ -405,15 +405,15 @@ void Analysis::fill_event(const hipo::banklist& bl, const BankIndex& bi, const F
                 if (!ftof_k) ftof_k = match_row(scint, pindex, DET_FTOF, std::nullopt);
                 if (ftof_k) {
                     if (scint) {
-                        ftof_chi2 = scint->getDouble("chi2", *ftof_k);
-                        const double time = scint->getDouble("time", *ftof_k);
-                        const double path = scint->getDouble("path", *ftof_k);
-                        const double vt = rec->getDouble("vt", pindex);
+                        ftof_chi2 = scint.get<double>("chi2", *ftof_k);
+                        const double time = scint.get<double>("time", *ftof_k);
+                        const double path = scint.get<double>("path", *ftof_k);
+                        const double vt = rec.get<double>("vt", pindex);
                         const double beta_pi = p / std::sqrt(p * p + PION_MASS * PION_MASS);
                         ftof_dt = time - vt - path / (beta_pi * C_CM_PER_NS);
                     }
                     if (scintx) {
-                        ftof_dedx = scintx->getDouble("dedx", *ftof_k);
+                        ftof_dedx = scintx.get<double>("dedx", *ftof_k);
                     }
                 }
 
@@ -428,12 +428,12 @@ void Analysis::fill_event(const hipo::banklist& bl, const BankIndex& bi, const F
                     pt,
                     theta,
                     phi,
-                    rec->getDouble("vx", pindex),
-                    rec->getDouble("vy", pindex),
+                    rec.get<double>("vx", pindex),
+                    rec.get<double>("vy", pindex),
                     vz_rec,
                     dbeta,
-                    rec->getDouble("chi2pid", pindex),
-                    rec->getDouble("vt", pindex),
+                    rec.get<double>("chi2pid", pindex),
+                    rec.get<double>("vt", pindex),
                     trkchi2,
                     trkndf,
                     trkredchi2,

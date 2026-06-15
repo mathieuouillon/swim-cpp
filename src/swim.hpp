@@ -25,12 +25,15 @@ struct SwimResult {
     SwimStatus status;
 };
 
-/// Swim a charged track BACKWARD from its DC-region-1 state to the beamline
-/// (closest approach to x=0,y=0). `pos_cm`/`mom_gev` are the position and
-/// momentum at DC R1; `q` is +1 (pi+) or -1 (pi-). Reversing the direction
-/// (u = -p_hat) while keeping q retraces the particle's incoming path. Returns
-/// the z at the closest approach.
+/// Swim a charged track BACKWARD from its DC state to the beamline: the
+/// closest approach to the line x=xB, y=yB (the beam position in cm; default
+/// the z-axis — coatjava's SwimToBeamLine uses the CCDB beam offset plus the
+/// per-event raster). `pos_cm`/`mom_gev` are the position and momentum at the
+/// DC; `q` is the charge. Reversing the direction (u = -p_hat) while keeping q
+/// retraces the particle's incoming path. Returns the z at the closest
+/// approach; doca_rho is the distance to (xB, yB) there.
 SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>& pos_cm,
-                                 const std::array<double, 3>& mom_gev, double q);
+                                 const std::array<double, 3>& mom_gev, double q,
+                                 double xB = 0.0, double yB = 0.0);
 
 }  // namespace vz

@@ -1,3 +1,7 @@
+// Thread-safe terminal progress bar (header-only). Previously shipped inside
+// external/hipo4 (progresstracker.hpp); the new hipo4 reading API no longer
+// bundles it, so it is vendored here as a project-local utility used by the
+// hipo_chain.hpp event loop and by vz-swim-hist's tree scan.
 #pragma once
 
 #include <fmt/core.h>

@@ -25,9 +25,8 @@
 #include "analysis.hpp"
 #include "constants.hpp"
 #include "field.hpp"
-#include "hipo4/chain.h"
-#include "hipo4/dictionary.h"
-#include "hipo4/reader.h"
+#include "hipo4/hipo.hpp"
+#include "hipo_chain.hpp"
 
 namespace {
 
@@ -172,15 +171,30 @@ const std::vector<std::string> WANTED_BANKS = {
 // data). Absent banks map to a -1 index in BankIndex -> nullptr in fill_event.
 std::vector<std::string> present_banks(const std::string& first_file) {
     std::vector<std::string> present;
-    hipo::reader r;
-    r.open(first_file.c_str());
-    hipo::dictionary dict;
-    r.readDictionary(dict);
+    auto f = hipo::file::open(first_file);
+    if (!f) {
+        std::fprintf(stderr, "warning: cannot open '%s' to read dictionary: %s\n",
+                     first_file.c_str(), f.error().message.c_str());
+        return present;
+    }
     for (const auto& n : WANTED_BANKS) {
-        if (dict.hasSchema(n.c_str())) present.push_back(n);
+        if (f->find_schema(n) != nullptr) present.push_back(n);
     }
     return present;
 }
+
+// Per-event callback for Chain::process: fold each event into the calling
+// worker's Analysis accumulator. A named functor (not a lambda), per the
+// project's preference for chain/event-processing callables; it is invoked
+// concurrently, but AccumulatorRegistry::local() is thread-local.
+struct EventFiller {
+    vz::AccumulatorRegistry* registry;
+    const vz::BankIndex*     idx;
+    const vz::Field*         field;
+    void operator()(vz::BankList& bl, int /*file_idx*/, long /*event_idx*/) const {
+        registry->local().fill_event(bl, *idx, *field);
+    }
+};
 
 }  // namespace
 
@@ -211,7 +225,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    hipo::chain ch(args.threads, /*progress=*/!args.quiet, /*verbose=*/false);
+    vz::Chain ch(args.threads, /*progress=*/!args.quiet, /*verbose=*/false);
     for (const auto& p : paths) ch.add(p);
     try {
         ch.open(/*validate_all=*/true);
@@ -240,7 +254,7 @@ int main(int argc, char** argv) {
 
     // Build the banklist from banks present in the first file, then resolve the
     // bank indices (absent -> -1).
-    hipo::banklist banks;
+    vz::BankList banks;
     try {
         banks = ch.getBanks(present_banks(paths[0]));
     } catch (const std::exception& e) {
@@ -252,12 +266,8 @@ int main(int argc, char** argv) {
     // Parallel event loop: each worker folds into its own Analysis (registry),
     // merged on the main thread afterwards.
     vz::AccumulatorRegistry registry;
-    ch.process(
-        banks,
-        [&](hipo::banklist& bl, int /*file_idx*/, long /*event_idx*/) {
-            registry.local().fill_event(bl, idx, field);
-        },
-        100.0);
+    EventFiller filler{&registry, &idx, &field};
+    ch.process(banks, filler, 100.0);
 
     vz::Analysis result = registry.merge_all();
     try {

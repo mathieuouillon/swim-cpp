@@ -36,7 +36,8 @@ std::optional<std::pair<std::size_t, double>> FieldMap::Axis::frac(double q) con
     return std::make_pair(i, f - static_cast<double>(i));
 }
 
-FieldMap FieldMap::load(const std::string& path, double scale, double z_shift) {
+FieldMap FieldMap::load(const std::string& path, double scale, double z_shift, double x_shift,
+                        double y_shift) {
     std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in) throw std::runtime_error("cannot open field map: " + path);
     const std::streamsize size = in.tellg();
@@ -107,6 +108,8 @@ FieldMap FieldMap::load(const std::string& path, double scale, double z_shift) {
     m.rho_ = rho;
     m.z_ = z;
     m.scale_ = scale;
+    m.x_shift_ = x_shift;
+    m.y_shift_ = y_shift;
     m.z_shift_ = z_shift;
     m.data_.reserve(n);
     std::size_t off = HEADER_BYTES;
@@ -152,6 +155,10 @@ std::optional<std::array<double, 3>> FieldMap::interp(double phi, double rho, do
 }
 
 std::optional<std::array<double, 3>> FieldMap::b_cart(double x, double y, double z) const {
+    // A rigidly translated map: look up the field at the point in the map's own
+    // (unshifted) frame, i.e. the lab point minus the shift.
+    x -= x_shift_;
+    y -= y_shift_;
     double rho = std::sqrt(x * x + y * y);
     double phi = std::atan2(y, x) * (180.0 / std::numbers::pi);
     if (phi < 0.0) phi += 360.0;
@@ -174,9 +181,11 @@ std::optional<std::array<double, 3>> FieldMap::b_cart(double x, double y, double
 
 CompositeField CompositeField::load(const std::string& torus_path, double torus_scale,
                                     const std::string& solenoid_path, double solenoid_scale,
-                                    double solenoid_z_shift) {
-    return CompositeField(FieldMap::load(torus_path, torus_scale, 0.0),
-                          FieldMap::load(solenoid_path, solenoid_scale, solenoid_z_shift));
+                                    double solenoid_z_shift, double torus_z_shift,
+                                    double torus_x_shift, double torus_y_shift) {
+    return CompositeField(
+        FieldMap::load(torus_path, torus_scale, torus_z_shift, torus_x_shift, torus_y_shift),
+        FieldMap::load(solenoid_path, solenoid_scale, solenoid_z_shift));
 }
 
 std::array<double, 3> CompositeField::b_kgauss(double x, double y, double z) const {

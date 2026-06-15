@@ -14,18 +14,18 @@
 #include "TH2.h"
 #include "constants.hpp"
 #include "field.hpp"
-#include "hipo4/bank.h"
+#include "hipo_chain.hpp"
 
 namespace vz {
 
 /// Resolves the wanted banks to their banklist indices once, up front. A value
 /// of -1 means the bank is absent from this run's files (the C++ analog of the
-/// Rust `Option<&Bank>` being None) — `fill_event` then passes nullptr.
+/// Rust `Option<&Bank>` being None) — `fill_event` then sees an empty bank_view.
 struct BankIndex {
     long rec_particle = -1, mc_particle = -1, mc_recmatch = -1, mc_true = -1;
     long rec_track = -1, rec_traj = -1, rec_covmat = -1;
     long rec_scint = -1, rec_scintx = -1, rec_cher = -1, rec_calo = -1;
-    explicit BankIndex(hipo::banklist& bl);
+    explicit BankIndex(BankList& bl);
 };
 
 class Analysis {
@@ -33,7 +33,7 @@ public:
     Analysis();
 
     /// Fold one event into the accumulator.
-    void fill_event(const hipo::banklist& banks, const BankIndex& idx, const Field& field);
+    void fill_event(const BankList& banks, const BankIndex& idx, const Field& field);
 
     /// Merge another partial accumulator into this one (bin-by-bin sum).
     void merge_from(const Analysis& other);

@@ -21,12 +21,21 @@ SwimResult fail() {
     return {nan, nan, 0.0, SwimStatus::NoMinimum};
 }
 
-// Radial velocity x*ux + y*uy; zero at the closest approach to the z-axis.
-inline double radial_vel(const state_type& y) { return y[0] * y[3] + y[1] * y[4]; }
+// Radial velocity (x-xB)*ux + (y-yB)*uy w.r.t. the beam axis at (xB, yB);
+// zero at the closest approach to that line.
+inline double radial_vel(const state_type& y, double xB, double yB) {
+    return (y[0] - xB) * y[3] + (y[1] - yB) * y[4];
+}
+
+// Distance to the beam axis at (xB, yB).
+inline double beam_rho(const state_type& y, double xB, double yB) {
+    return std::sqrt((y[0] - xB) * (y[0] - xB) + (y[1] - yB) * (y[1] - yB));
+}
 }  // namespace
 
 SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>& pos_cm,
-                                 const std::array<double, 3>& mom_gev, double q) {
+                                 const std::array<double, 3>& mom_gev, double q, double xB,
+                                 double yB) {
     const double p = std::sqrt(mom_gev[0] * mom_gev[0] + mom_gev[1] * mom_gev[1] +
                                mom_gev[2] * mom_gev[2]);
     if (!(p > 1e-6)) return fail();
@@ -50,7 +59,7 @@ SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>
         odeint::make_dense_output(ATOL, RTOL, odeint::runge_kutta_dopri5<state_type>());
     stepper.initialize(y, 0.0, 0.1);
 
-    double g_prev = radial_vel(y);
+    double g_prev = radial_vel(y, xB, yB);
     state_type y_end{};
 
     try {
@@ -64,13 +73,13 @@ SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>
             const bool capped = (t1 >= MAX_PATH_CM);
             const double t_end = capped ? MAX_PATH_CM : t1;
             stepper.calc_state(t_end, y_end);
-            const double g_cur = radial_vel(y_end);
+            const double g_cur = radial_vel(y_end, xB, yB);
 
             if ((g_prev < 0.0) != (g_cur < 0.0)) {  // radial-velocity sign change
-                auto G = [&stepper](double t) {
+                auto G = [&stepper, xB, yB](double t) {
                     state_type s;
                     stepper.calc_state(t, s);
-                    return s[0] * s[3] + s[1] * s[4];
+                    return radial_vel(s, xB, yB);
                 };
                 std::uintmax_t maxit = 60;
                 auto tol = [](double a, double b) { return std::fabs(b - a) < 1e-9; };
@@ -78,12 +87,10 @@ SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>
                 const double s_star = 0.5 * (br.first + br.second);
                 state_type ys;
                 stepper.calc_state(s_star, ys);
-                return {ys[2], std::sqrt(ys[0] * ys[0] + ys[1] * ys[1]), s_star,
-                        SwimStatus::Converged};
+                return {ys[2], beam_rho(ys, xB, yB), s_star, SwimStatus::Converged};
             }
             if (capped) {
-                return {y_end[2], std::sqrt(y_end[0] * y_end[0] + y_end[1] * y_end[1]),
-                        MAX_PATH_CM, SwimStatus::MaxPath};
+                return {y_end[2], beam_rho(y_end, xB, yB), MAX_PATH_CM, SwimStatus::MaxPath};
             }
             g_prev = g_cur;
         }
@@ -91,8 +98,7 @@ SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>
         return fail();
     }
 
-    return {y_end[2], std::sqrt(y_end[0] * y_end[0] + y_end[1] * y_end[1]),
-            stepper.current_time(), SwimStatus::MaxPath};
+    return {y_end[2], beam_rho(y_end, xB, yB), stepper.current_time(), SwimStatus::MaxPath};
 }
 
 }  // namespace vz

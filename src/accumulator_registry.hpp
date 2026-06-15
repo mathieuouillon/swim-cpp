@@ -1,4 +1,4 @@
-// Per-worker Analysis accumulators for hipo::chain::process, merged on the main
+// Per-worker Analysis accumulators for vz::Chain::process, merged on the main
 // thread after processing. This is the C++ analog of the Rust par_reduce_records
 // (per-worker accumulator merged bin-by-bin), and matches the original C++
 // "thread_local histogram set + registry" pattern.

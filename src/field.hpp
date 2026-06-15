@@ -29,9 +29,13 @@ struct Field {
 class FieldMap {
 public:
     /// Load and parse a clas12-cmag binary map. Throws std::runtime_error on any
-    /// format/IO error. `scale` multiplies the field; `z_shift` rigidly
-    /// translates the map along z (lab z is looked up at z - z_shift).
-    static FieldMap load(const std::string& path, double scale, double z_shift);
+    /// format/IO error. `scale` multiplies the field; the shifts rigidly
+    /// translate the map (lab point is looked up at x-x_shift, y-y_shift,
+    /// z-z_shift). NOTE a transverse shift only translates the lookup point;
+    /// the returned Cartesian components are not re-rotated (exact for a
+    /// rigidly displaced magnet).
+    static FieldMap load(const std::string& path, double scale, double z_shift,
+                         double x_shift = 0.0, double y_shift = 0.0);
 
     /// Lab-frame Cartesian field in kG (scale applied), or nullopt out of volume.
     std::optional<std::array<double, 3>> b_cart(double x, double y, double z) const;
@@ -60,6 +64,8 @@ private:
     Axis z_{};
     std::vector<float> data_;  // 3 components per node
     double scale_ = 1.0;
+    double x_shift_ = 0.0;
+    double y_shift_ = 0.0;
     double z_shift_ = 0.0;
 };
 
@@ -68,7 +74,8 @@ class CompositeField : public Field {
 public:
     static CompositeField load(const std::string& torus_path, double torus_scale,
                                const std::string& solenoid_path, double solenoid_scale,
-                               double solenoid_z_shift);
+                               double solenoid_z_shift, double torus_z_shift = 0.0,
+                               double torus_x_shift = 0.0, double torus_y_shift = 0.0);
 
     std::array<double, 3> b_kgauss(double x, double y, double z) const override;
 

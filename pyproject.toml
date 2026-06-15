@@ -1,0 +1,14 @@
+[project]
+name = "swim-cpp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.8",
+    "mplhep>=1.2.0",
+    "numpy>=1.26",
+    "scienceplots>=2.2.1",
+    "tqdm>=4.66",
+    "uproot>=5.3",
+]
