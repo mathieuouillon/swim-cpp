@@ -400,12 +400,17 @@ def fit_peak2_gauss(counts: np.ndarray, centers: np.ndarray, lo: float, hi: floa
         )
     except (RuntimeError, ValueError):
         return _FAILED_PEAK2
+    sigma = abs(float(popt[2]))
+    # Reject a non-peak: a real peak2 is < ~3 cm wide, and a Gaussian as wide as
+    # its own fitting slice (sigma railed to the bound) means the slice held no
+    # resolved peak -- e.g. the lowest-theta bin where the two foils merge.
+    if sigma > 3.0 or sigma >= 0.9 * width:
+        return _FAILED_PEAK2
     perr = np.sqrt(np.diag(pcov))  # 1-sigma parameter errors
     xf = np.linspace(float(x[0]), float(x[-1]), 200)
     yf = _gaussian(xf, *popt)
-    return Peak2Fit(float(popt[1]), float(abs(popt[2])),
-                    float(perr[1]), float(perr[2]), float(popt[0]),
-                    klo, khi, xf, yf, ok=True)
+    return Peak2Fit(float(popt[1]), sigma, float(perr[1]), float(perr[2]),
+                    float(popt[0]), klo, khi, xf, yf, ok=True)
 
 
 def swum_peaks(root_file: Path) -> dict[tuple[int, str], float]:
@@ -520,85 +525,99 @@ def write_summary(scan_dir: Path, param: str, vals: list[float]):
 
 
 def write_peak2_fits(scan_dir: Path, param: str, vals: list[float]):
-    """<param>_peak2_fit.pdf + .csv: per scan value, a Gaussian fit of the top
-    of the SECOND (downstream, ~ -3 cm) swum-vz peak reporting its mean and
-    sigma WITH their 1-sigma errors.
+    """<param>_peak2_fit.pdf + .csv: per scan value AND per theta bin, a Gaussian
+    fit of the top of the SECOND (downstream, ~ -3 cm) swum-vz peak with its mean
+    and sigma and their 1-sigma errors.
 
-    For each scan value the swum-vz histogram is integrated over the whole
-    (p, theta) grid, the top of peak2 is fit (see fit_peak2_gauss), and a page
-    shows the spectrum, the fitted Gaussian, the fitted bins, and
-    mean +/- err / sigma +/- err. A final page plots peak2 mean and sigma
-    versus the scanned parameter with error bars."""
+    For each scan value the swum-vz histogram is summed over the momentum bins
+    within each theta bin, and the top of peak2 is fit per theta (see
+    fit_peak2_gauss). A per-value page shows the fit in every theta bin (one
+    tab10 colour each, as in plot_vz_bins.py); the final page plots peak2 mean
+    and sigma versus the scanned parameter, one colour per theta bin."""
     label = PARAMS[param][1]
     _, lo2, hi2 = PEAK_WINDOWS[1]  # ("peak2", -5.5, -0.5)
-    fits: dict[float, Peak2Fit] = {}
+    th_colors = [plt.cm.tab10(i % 10) for i in range(len(TH_BINS))]
+    th_labels = [rf"${t_lo}^\circ \leq \theta < {t_hi}^\circ$" for t_lo, t_hi in TH_BINS]
+    fits: dict[float, list[Peak2Fit]] = {}  # value -> Peak2Fit per theta bin
 
+    ncol = 5
+    nrow = (len(TH_BINS) + ncol - 1) // ncol
+    zlo, zhi = -9.0, 0.5  # zoom each panel onto peak2 (peak1 sits out near -10)
     out = scan_dir / f"{param}_peak2_fit.pdf"
     with PdfPages(out) as pdf:
         for v in sorted(vals):
             rf = job_dir(scan_dir, param, v) / "vz_bins.root"
             if not rf.exists():
                 continue
-            tot, edges = None, None
+            # Sum over momentum within each theta bin -> one spectrum per theta.
+            spectra, edges = [], None
             with uproot.open(rf) as f:
-                for p_lo, p_hi in P_BINS:
-                    for t_lo, t_hi in TH_BINS:
+                for t_lo, t_hi in TH_BINS:
+                    tot = None
+                    for p_lo, p_hi in P_BINS:
                         key = _key("vz_swum", p_lo, p_hi, t_lo, t_hi)
                         if key not in f:
                             continue
                         hv, edges = f[key].to_numpy()
                         tot = hv if tot is None else tot + hv
-            if tot is None or tot.sum() < MIN_ENTRIES:
+                    spectra.append(tot)
+            if edges is None:
                 continue
             centers = 0.5 * (edges[:-1] + edges[1:])
-            fit = fit_peak2_gauss(tot, centers, lo2, hi2)
-            if fit.ok:
-                fits[v] = fit
-
-            fig, ax = plt.subplots(figsize=(7, 5))
             bw = centers[1] - centers[0]
-            ax.bar(centers, tot, width=bw, color="0.85", edgecolor="0.6", lw=0.3,
-                   label=r"swum $v_z$ (p, $\theta$ integrated)")
-            ax.axvspan(lo2, hi2, color="tab:blue", alpha=0.07, label="peak2 window")
-            if fit.ok:
-                ax.plot(fit.xfit, fit.yfit, color="tab:red", lw=2.0,
-                        label="Gaussian fit (top)")
-                ax.scatter(centers[fit.lo:fit.hi + 1], tot[fit.lo:fit.hi + 1],
-                           s=12, color="tab:blue", zorder=3, label="fitted bins")
-                ax.axvline(fit.mean, color="tab:red", ls=":", lw=1.0)
-                ax.text(0.025, 0.97,
-                        "peak2 Gaussian fit\n"
-                        f"$\\mu$ = {fit.mean:.3f} $\\pm$ {fit.mean_err:.3f} cm\n"
-                        f"$\\sigma$ = {fit.sigma:.3f} $\\pm$ {fit.sigma_err:.3f} cm",
-                        transform=ax.transAxes, va="top", ha="left", fontsize=10,
-                        bbox=dict(boxstyle="round", fc="white", ec="0.7"))
-            else:
-                ax.text(0.025, 0.97, "peak2 fit failed", transform=ax.transAxes,
-                        va="top", ha="left", color="tab:red")
-            ax.set_xlabel(r"swum $v_z$ [cm]")
-            ax.set_ylabel("counts")
-            ax.set_title(f"{label} {vfmt(v)} — 2nd-peak Gaussian fit")
-            ax.legend(fontsize=8, loc="upper right")
+            zoom = (centers >= zlo) & (centers <= zhi)
+
+            theta_fits = []
+            fig, axs = plt.subplots(nrow, ncol, figsize=(2.7 * ncol, 2.5 * nrow),
+                                    squeeze=False, sharex=True)
+            for it, ((t_lo, t_hi), tot) in enumerate(zip(TH_BINS, spectra)):
+                ax = axs[it // ncol][it % ncol]
+                fit = (fit_peak2_gauss(tot, centers, lo2, hi2)
+                       if tot is not None and tot.sum() >= MIN_ENTRIES else _FAILED_PEAK2)
+                theta_fits.append(fit)
+                if tot is not None:
+                    ax.bar(centers[zoom], tot[zoom], width=bw, color="0.86", edgecolor="none")
+                    ax.axvspan(lo2, hi2, color="tab:blue", alpha=0.05)
+                if fit.ok:
+                    ax.plot(fit.xfit, fit.yfit, color=th_colors[it], lw=1.6)
+                    ax.axvline(fit.mean, color=th_colors[it], ls=":", lw=0.8)
+                    ax.text(0.04, 0.95, f"$\\mu$={fit.mean:.2f}\n$\\sigma$={fit.sigma:.2f}",
+                            transform=ax.transAxes, va="top", ha="left", fontsize=6.5)
+                ax.set_title(th_labels[it], color=th_colors[it], fontsize=8)
+                ax.set_xlim(zlo, zhi)
+                ax.tick_params(labelsize=6)
+                if it // ncol == nrow - 1:
+                    ax.set_xlabel(r"swum $v_z$ [cm]", fontsize=8)
+            fits[v] = theta_fits
+            fig.suptitle(rf"{label} {vfmt(v)} — 2nd-peak Gaussian fit per $\theta$", fontsize=11)
             fig.tight_layout()
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
+        # Summary: peak2 mean and sigma vs the scanned value, one colour per theta.
         if fits:
             vs = sorted(fits)
-            means = np.array([fits[v].mean for v in vs])
-            sigmas = np.array([fits[v].sigma for v in vs])
-            mean_errs = np.array([fits[v].mean_err for v in vs])
-            sigma_errs = np.array([fits[v].sigma_err for v in vs])
-            fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.5))
-            a1.errorbar(vs, means, yerr=mean_errs, marker="o", ms=4,
-                        color="tab:red", capsize=3, elinewidth=0.8, lw=1.2)
+            fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 5.5))
+            for it in range(len(TH_BINS)):
+                ok = [fits[v][it].ok for v in vs]
+                if not any(ok):
+                    continue
+                mu = np.array([fits[v][it].mean if fits[v][it].ok else np.nan for v in vs])
+                mue = np.array([fits[v][it].mean_err if fits[v][it].ok else 0.0 for v in vs])
+                sg = np.array([fits[v][it].sigma if fits[v][it].ok else np.nan for v in vs])
+                sge = np.array([fits[v][it].sigma_err if fits[v][it].ok else 0.0 for v in vs])
+                a1.errorbar(vs, mu, yerr=mue, marker="o", ms=3, lw=1.0, capsize=2,
+                            elinewidth=0.7, color=th_colors[it], label=th_labels[it])
+                a2.errorbar(vs, sg, yerr=sge, marker="o", ms=3, lw=1.0, capsize=2,
+                            elinewidth=0.7, color=th_colors[it])
             a1.set_xlabel(label); a1.set_ylabel(r"peak2 $\mu$ [cm]")
             a1.set_title(r"2nd-peak mean vs " + label)
-            a2.errorbar(vs, sigmas, yerr=sigma_errs, marker="o", ms=4,
-                        color="tab:blue", capsize=3, elinewidth=0.8, lw=1.2)
             a2.set_xlabel(label); a2.set_ylabel(r"peak2 $\sigma$ [cm]")
             a2.set_title(r"2nd-peak width vs " + label)
-            fig.tight_layout()
+            h, l = a1.get_legend_handles_labels()
+            fig.legend(h, l, loc="upper center", ncol=5, fontsize=7, frameon=False,
+                       title=r"$\theta$ bin", bbox_to_anchor=(0.5, 1.0))
+            fig.tight_layout(rect=(0, 0, 1, 0.88))
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
     print(f"Saved {out}")
@@ -606,12 +625,14 @@ def write_peak2_fits(scan_dir: Path, param: str, vals: list[float]):
     csv_path = scan_dir / f"{param}_peak2_fit.csv"
     with open(csv_path, "w", newline="") as cf:
         w = csv.writer(cf)
-        w.writerow([param, "peak2_mean_cm", "peak2_mean_err_cm",
-                    "peak2_sigma_cm", "peak2_sigma_err_cm"])
+        w.writerow([param, "theta_lo", "theta_hi", "peak2_mean_cm",
+                    "peak2_mean_err_cm", "peak2_sigma_cm", "peak2_sigma_err_cm"])
         for v in sorted(fits):
-            ft = fits[v]
-            w.writerow([vfmt(v), f"{ft.mean:.4f}", f"{ft.mean_err:.4f}",
-                        f"{ft.sigma:.4f}", f"{ft.sigma_err:.4f}"])
+            for it, (t_lo, t_hi) in enumerate(TH_BINS):
+                ft = fits[v][it]
+                if ft.ok:
+                    w.writerow([vfmt(v), t_lo, t_hi, f"{ft.mean:.4f}", f"{ft.mean_err:.4f}",
+                                f"{ft.sigma:.4f}", f"{ft.sigma_err:.4f}"])
     print(f"Saved {csv_path}")
 
 
