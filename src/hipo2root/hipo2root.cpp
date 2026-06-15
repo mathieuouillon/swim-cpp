@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <string>
 #include <thread>  // std::thread::hardware_concurrency (default worker count only)
 #include <vector>
@@ -53,6 +54,7 @@ struct cli_args {
     std::string ccdb_variation = "default";  // CCDB variation for the lookup
     long long record_begin = -1;  // hidden: worker's global HIPO record range [begin, end)
     long long record_end = -1;
+    std::string progress_file;  // hidden: shared progress-counter path (supervisor -> worker)
 };
 
 // Build the command-line parser (external/argparse). --worker is a hidden marker
@@ -85,6 +87,7 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--worker").flag().hidden();  // re-exec'd worker marker
     p.add_argument("--record-begin").default_value(static_cast<long long>(-1)).hidden();
     p.add_argument("--record-end").default_value(static_cast<long long>(-1)).hidden();
+    p.add_argument("--progress-file").default_value("").hidden();
     return p;
 }
 
@@ -441,7 +444,19 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
     const std::size_t rec_end = args.record_end >= 0
                                     ? static_cast<std::size_t>(args.record_end)
                                     : std::numeric_limits<std::size_t>::max();
-    ch.process(banks, dumper, rec_begin, rec_end);
+    // Report progress to the supervisor's shared counter (amortized) when re-exec'd.
+    vz::shared_counter prog =
+        args.progress_file.empty() ? vz::shared_counter{}
+                                   : vz::shared_counter::map(args.progress_file, /*create=*/false);
+    std::uint64_t prog_local = 0;
+    ch.process(
+        banks,
+        [&](vz::bank_list& bl, int fi, long ei) {
+            dumper(bl, fi, ei);
+            if ((++prog_local & 0x3FFFU) == 0) prog.add(0x4000);
+        },
+        rec_begin, rec_end);
+    prog.add(prog_local & 0x3FFFU);
 
     tree.Write();
     // The final (single, non-worker) file carries the run + CCDB metadata; worker
@@ -461,18 +476,26 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
                     int jobs) -> int {
     const bool by_file = paths.size() >= static_cast<std::size_t>(jobs);
 
+    // Open the inputs once: total events (for the aggregate progress bar) and
+    // total records (to record-shard one/few files). On a multi-GB train file
+    // this index scan takes a moment, so announce it for immediate feedback.
+    if (!args.quiet) {
+        fmt::print("hipo2root: scanning {} input file(s)...\n", paths.size());
+        std::fflush(stdout);
+    }
+    vz::chain probe(/*progress=*/false, /*verbose=*/false);
+    for (const auto& p : paths) probe.add(p);
+    try {
+        probe.open(/*validate_all=*/true);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: could not open inputs: %s\n", e.what());
+        return 1;
+    }
+    const auto total_events = static_cast<std::uint64_t>(probe.total_events());
+    const std::uint64_t total_records = probe.total_records();
+
     int n_workers = jobs;
-    std::uint64_t total_records = 0;
     if (!by_file) {
-        vz::chain probe(/*progress=*/false, /*verbose=*/false);
-        for (const auto& p : paths) probe.add(p);
-        try {
-            probe.open(/*validate_all=*/true);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "error: could not open inputs: %s\n", e.what());
-            return 1;
-        }
-        total_records = probe.total_records();
         n_workers = static_cast<int>(std::min<std::uint64_t>(
             static_cast<std::uint64_t>(jobs), std::max<std::uint64_t>(1, total_records)));
         if (n_workers <= 1) return run_dump(args, paths, /*worker_mode=*/false);  // nothing to split
@@ -487,13 +510,17 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
         return 1;
     }
 
+    const std::string progress_path = fmt::format("{}/progress", dir);
+    vz::shared_counter progress = vz::shared_counter::map(progress_path, /*create=*/true);
+
     std::vector<std::string> parts;
     std::vector<std::vector<std::string>> argvs;
     const std::uint64_t chunk = by_file ? 0 : (total_records + n_workers - 1) / n_workers;
     for (int i = 0; i < n_workers; ++i) {
         const std::string part = fmt::format("{}/part-{:03}.root", dir, i);
         parts.push_back(part);
-        std::vector<std::string> av = {exe, "--jobs", "1", "--worker", "--quiet", "--output", part};
+        std::vector<std::string> av = {exe,      "--jobs",          "1",      "--worker", "--quiet",
+                                       "--output", part, "--progress-file", progress_path};
         if (by_file) {
             for (std::size_t j = i; j < paths.size(); j += static_cast<std::size_t>(n_workers))
                 av.push_back(paths[j]);
@@ -514,7 +541,32 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
                args.output);
     print_run_config(paths[0]);
 
-    if (!vz::run_workers(argvs)) {
+    // Spawn the workers, then render one aggregate progress bar fed by the shared
+    // counter while they run (no progress thread exists at fork time).
+    const auto pids = vz::spawn_workers(argvs);
+    bool ok = !pids.empty();
+    if (ok) {
+        std::unique_ptr<progress_tracker> bar;
+        if (!args.quiet && total_events > 0) {
+            progress_tracker::config cfg;
+            cfg.label = "Processing";
+            cfg.show_eta = true;
+            cfg.show_rate = true;
+            bar = std::make_unique<progress_tracker>(static_cast<std::size_t>(total_events), cfg);
+            bar->start();
+        }
+        std::uint64_t last = 0;
+        ok = vz::reap_workers(pids, [&] {
+            if (!bar) return;
+            const std::uint64_t c = progress.load();
+            if (c > last) {
+                bar->add(static_cast<std::size_t>(c - last));
+                last = c;
+            }
+        });
+        if (bar) bar->finish();
+    }
+    if (!ok) {
         std::fprintf(stderr, "error: one or more workers failed; '%s' not written\n",
                      args.output.c_str());
         std::error_code ec;
@@ -571,6 +623,7 @@ auto main(int argc, char** argv) -> int {
     args.ccdb_variation = p.get<std::string>("--ccdb-variation");
     args.record_begin = p.get<long long>("--record-begin");
     args.record_end = p.get<long long>("--record-end");
+    args.progress_file = p.get<std::string>("--progress-file");
 
     // --run-config: just report each input's RUN::config (run number, torus and
     // solenoid scale factors) without producing a tree.

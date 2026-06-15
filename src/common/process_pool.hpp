@@ -21,13 +21,17 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -88,15 +92,66 @@ inline auto ensure_parent_dir(const std::string& path) -> void {
     fs::create_directories(parent, ec);
 }
 
-/// Fork+exec one worker per argv vector (argv[i][0] is the exe path) and wait
-/// for all of them. Returns true iff every worker exited 0; all children are
-/// reaped even when one fails. Call from a single-threaded supervisor and
-/// before any heavy allocation — the children re-exec immediately, so the
-/// supervisor's address space is never copied wholesale.
-[[nodiscard]] inline auto run_workers(const std::vector<std::vector<std::string>>& argvs) -> bool {
+/// A process-shared atomic counter backed by a small temp file, so re-exec'd
+/// workers can report progress to the supervisor (which renders one aggregate
+/// bar). The supervisor map()s it with create=true; each worker map()s the same
+/// path with create=false. uint64 atomics are lock-free and address-free, so a
+/// single shared mapping is safe across processes; an unopenable path yields a
+/// no-op counter.
+struct shared_counter {
+    std::atomic<std::uint64_t>* cell = nullptr;
+    int fd = -1;
+
+    shared_counter() = default;
+    shared_counter(const shared_counter&) = delete;
+    auto operator=(const shared_counter&) -> shared_counter& = delete;
+    shared_counter(shared_counter&& o) noexcept : cell(o.cell), fd(o.fd) {
+        o.cell = nullptr;
+        o.fd = -1;
+    }
+    ~shared_counter() {
+        if (cell != nullptr) ::munmap(cell, sizeof(std::atomic<std::uint64_t>));
+        if (fd >= 0) ::close(fd);
+    }
+
+    [[nodiscard]] static auto map(const std::string& path, bool create) -> shared_counter {
+        shared_counter s;
+        s.fd = ::open(path.c_str(), create ? (O_RDWR | O_CREAT | O_TRUNC) : O_RDWR, 0600);
+        if (s.fd < 0) return s;  // null cell -> a silent no-op
+        if (create && ::ftruncate(s.fd, sizeof(std::atomic<std::uint64_t>)) != 0) {
+            ::close(s.fd);
+            s.fd = -1;
+            return s;
+        }
+        void* p = ::mmap(nullptr, sizeof(std::atomic<std::uint64_t>), PROT_READ | PROT_WRITE,
+                         MAP_SHARED, s.fd, 0);
+        if (p == MAP_FAILED) {
+            ::close(s.fd);
+            s.fd = -1;
+            return s;
+        }
+        s.cell = static_cast<std::atomic<std::uint64_t>*>(p);
+        if (create) s.cell->store(0, std::memory_order_relaxed);
+        return s;
+    }
+    [[nodiscard]] auto valid() const -> bool { return cell != nullptr; }
+    auto add(std::uint64_t n) -> void {
+        if (cell != nullptr) cell->fetch_add(n, std::memory_order_relaxed);
+    }
+    [[nodiscard]] auto load() const -> std::uint64_t {
+        return cell != nullptr ? cell->load(std::memory_order_relaxed) : 0;
+    }
+};
+
+/// Fork+exec one worker per argv vector (argv[i][0] is the exe path); returns the
+/// child pids, or an empty vector (after reaping any already-started children) if
+/// a fork fails. Call from a single-threaded supervisor before starting any
+/// progress thread — children re-exec immediately, so the address space is never
+/// copied wholesale.
+[[nodiscard]] inline auto spawn_workers(const std::vector<std::vector<std::string>>& argvs)
+    -> std::vector<::pid_t> {
     std::vector<::pid_t> pids;
     pids.reserve(argvs.size());
-
     for (const auto& argv : argvs) {
         std::vector<char*> cargv;
         cargv.reserve(argv.size() + 1);
@@ -110,7 +165,7 @@ inline auto ensure_parent_dir(const std::string& path) -> void {
                 int st = 0;
                 ::waitpid(p, &st, 0);
             }
-            return false;
+            return {};
         }
         if (pid == 0) {
             ::execv(cargv[0], cargv.data());
@@ -119,27 +174,51 @@ inline auto ensure_parent_dir(const std::string& path) -> void {
         }
         pids.push_back(pid);
     }
+    return pids;
+}
 
+/// Poll-wait for all `pids`, calling `tick()` ~10x/s while any are still running
+/// (used to refresh the aggregate progress bar). Returns true iff every worker
+/// exited 0; all are reaped even when one fails.
+template <class Tick>
+[[nodiscard]] inline auto reap_workers(const std::vector<::pid_t>& pids, Tick&& tick) -> bool {
+    if (pids.empty()) return false;
+    std::vector<bool> done(pids.size(), false);
+    std::size_t remaining = pids.size();
     bool ok = true;
-    for (std::size_t i = 0; i < pids.size(); ++i) {
-        int status = 0;
-        if (::waitpid(pids[i], &status, 0) < 0) {
-            std::perror("waitpid");
-            ok = false;
-            continue;
-        }
-        if (WIFEXITED(status)) {
-            const int code = WEXITSTATUS(status);
-            if (code != 0) {
-                fmt::print(stderr, "[pool] worker {} exited with status {}\n", i, code);
+    while (remaining > 0) {
+        for (std::size_t i = 0; i < pids.size(); ++i) {
+            if (done[i]) continue;
+            int status = 0;
+            const ::pid_t r = ::waitpid(pids[i], &status, WNOHANG);
+            if (r == 0) continue;  // still running
+            done[i] = true;
+            --remaining;
+            if (r < 0) {
+                ok = false;
+            } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                fmt::print(stderr, "[pool] worker {} exited with status {}\n", i,
+                           WEXITSTATUS(status));
+                ok = false;
+            } else if (WIFSIGNALED(status)) {
+                fmt::print(stderr, "[pool] worker {} killed by signal {}\n", i, WTERMSIG(status));
                 ok = false;
             }
-        } else if (WIFSIGNALED(status)) {
-            fmt::print(stderr, "[pool] worker {} killed by signal {}\n", i, WTERMSIG(status));
-            ok = false;
+        }
+        tick();
+        if (remaining > 0) {
+            const timespec ts{.tv_sec = 0, .tv_nsec = 100'000'000};  // 100 ms
+            ::nanosleep(&ts, nullptr);
         }
     }
     return ok;
+}
+
+/// Fork+exec all workers and wait for them (no progress callback).
+[[nodiscard]] inline auto run_workers(const std::vector<std::vector<std::string>>& argvs) -> bool {
+    const std::vector<::pid_t> pids = spawn_workers(argvs);
+    if (pids.empty()) return false;
+    return reap_workers(pids, [] {});
 }
 
 /// Merge partial ROOT files into `out_path`, summing same-named histograms

@@ -95,6 +95,7 @@ struct cli_args {
     std::string emit_counts;
     long long entry_begin = -1;
     long long entry_end = -1;
+    std::string progress_file;  // shared progress-counter path (supervisor -> worker)
     // Swim configuration, mirroring coatjava's vertex procedure.
     int dc_region = 3;    // start state: DC region 3 (coatjava) or 1
     int pid = 11;         // species to analyze by reco pid: 11 e-, 211 pi+, -211 pi-
@@ -177,6 +178,7 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--emit-counts").default_value("").hidden();
     p.add_argument("--entry-begin").default_value(static_cast<long long>(-1)).hidden();
     p.add_argument("--entry-end").default_value(static_cast<long long>(-1)).hidden();
+    p.add_argument("--progress-file").default_value("").hidden();
     return p;
 }
 
@@ -191,6 +193,7 @@ auto read_args(const argparse::parser& p) -> cli_args {
     a.emit_counts = p.get<std::string>("--emit-counts");
     a.entry_begin = p.get<long long>("--entry-begin");
     a.entry_end = p.get<long long>("--entry-end");
+    a.progress_file = p.get<std::string>("--progress-file");
     a.dc_region = p.get<int>("--dc-region");
     a.pid = p.get<int>("--pid");
     a.beam_x = p.get<double>("--beam-x");
@@ -345,7 +348,8 @@ struct swim_worker {
     const cli_args* args = nullptr;
     const vz::magnetic_field* field = nullptr;
     Long64_t begin = 0, end = 0;
-    progress_tracker* progress = nullptr;  // nullptr = no progress display
+    progress_tracker* progress = nullptr;     // nullptr = no local progress display
+    vz::shared_counter* shared = nullptr;     // nullptr = not reporting to a supervisor
 
     cell_grid grid;
     // Cut flow.
@@ -388,8 +392,9 @@ struct swim_worker {
         Long64_t since_report = 0;
         for (Long64_t i = begin; i < end; ++i) {
             tree.GetEntry(i);
-            if (progress && ++since_report == PROGRESS_CHUNK) {
-                progress->add(static_cast<std::size_t>(PROGRESS_CHUNK));
+            if (++since_report == PROGRESS_CHUNK) {
+                if (progress) progress->add(static_cast<std::size_t>(PROGRESS_CHUNK));
+                if (shared) shared->add(static_cast<std::uint64_t>(PROGRESS_CHUNK));
                 since_report = 0;
             }
             if (pid != args->pid) continue;
@@ -440,7 +445,10 @@ struct swim_worker {
             grid.sec_swum[sec][pb][tb]->Fill(sw.vz);
             grid.sec_dvz[sec][pb][tb]->Fill(sw.vz - vz_rec);
         }
-        if (progress && since_report > 0) progress->add(static_cast<std::size_t>(since_report));
+        if (since_report > 0) {
+            if (progress) progress->add(static_cast<std::size_t>(since_report));
+            if (shared) shared->add(static_cast<std::uint64_t>(since_report));
+        }
     }
 };
 
@@ -583,10 +591,16 @@ auto run_worker(const cli_args& args, Long64_t begin, Long64_t end, bool worker_
         progress->start();
     }
 
+    // When re-exec'd by the supervisor, report progress to its shared counter.
+    vz::shared_counter shared =
+        args.progress_file.empty() ? vz::shared_counter{}
+                                   : vz::shared_counter::map(args.progress_file, /*create=*/false);
+
     swim_worker worker;
     worker.args = &args;
     worker.field = field_ptr.get();
     worker.progress = progress.get();
+    worker.shared = shared.valid() ? &shared : nullptr;
     worker.begin = begin;
     worker.end = end;
     worker();
@@ -629,6 +643,8 @@ auto run_supervisor(const cli_args& args, char** argv, Long64_t n_entries, Long6
     }
 
     const Long64_t chunk = (n_entries + n_workers - 1) / n_workers;
+    const std::string progress_path = fmt::format("{}/progress", dir);
+    vz::shared_counter progress = vz::shared_counter::map(progress_path, /*create=*/true);
     const std::vector<std::string> base = base_worker_argv(exe, args);
     std::vector<std::string> parts, counts;
     std::vector<std::vector<std::string>> argvs;
@@ -640,8 +656,9 @@ auto run_supervisor(const cli_args& args, char** argv, Long64_t n_entries, Long6
         parts.push_back(part);
         counts.push_back(cnt);
         std::vector<std::string> av = base;
-        av.insert(av.end(), {"--output", part, "--emit-counts", cnt, "--entry-begin",
-                             fmt::format("{}", begin), "--entry-end", fmt::format("{}", end)});
+        av.insert(av.end(), {"--output", part, "--emit-counts", cnt, "--progress-file",
+                             progress_path, "--entry-begin", fmt::format("{}", begin),
+                             "--entry-end", fmt::format("{}", end)});
         for (const auto& p : args.inputs) av.push_back(p);
         argvs.push_back(std::move(av));
     }
@@ -652,7 +669,32 @@ auto run_supervisor(const cli_args& args, char** argv, Long64_t n_entries, Long6
     fmt::print("swim: from DC region {}, beam offset ({}, {}) cm + per-event raster\n",
                args.dc_region, args.beam_x, args.beam_y);
 
-    if (!vz::run_workers(argvs)) {
+    // Spawn the workers, then render one aggregate progress bar fed by the shared
+    // counter while they swim (workers are silent in --emit-counts mode).
+    const auto pids = vz::spawn_workers(argvs);
+    bool ok = !pids.empty();
+    if (ok) {
+        std::unique_ptr<progress_tracker> bar;
+        if (!args.quiet && n_entries > 0) {
+            progress_tracker::config config;
+            config.label = "Swimming";
+            config.show_eta = true;
+            config.show_rate = true;
+            bar = std::make_unique<progress_tracker>(static_cast<std::size_t>(n_entries), config);
+            bar->start();
+        }
+        std::uint64_t last = 0;
+        ok = vz::reap_workers(pids, [&] {
+            if (!bar) return;
+            const std::uint64_t c = progress.load();
+            if (c > last) {
+                bar->add(static_cast<std::size_t>(c - last));
+                last = c;
+            }
+        });
+        if (bar) bar->finish();
+    }
+    if (!ok) {
         std::fprintf(stderr, "error: one or more workers failed; '%s' not written\n",
                      args.output.c_str());
         std::error_code ec;
