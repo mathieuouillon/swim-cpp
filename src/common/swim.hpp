@@ -16,24 +16,24 @@ namespace vz {
 
 inline constexpr double K0 = 0.299792458e-3;
 
-enum class SwimStatus { Converged, MaxPath, NoMinimum };
+enum class swim_status { converged, max_path, no_minimum };
 
-struct SwimResult {
+struct swim_result {
     double vz;        // z at the closest approach (= swum vz); NaN on failure
     double doca_rho;  // sqrt(x^2 + y^2) at the closest approach
     double path;      // arc length s at the stop (diagnostic, not histogrammed)
-    SwimStatus status;
+    swim_status status;
 };
 
 /// Swim a charged track BACKWARD from its DC state to the beamline: the
-/// closest approach to the line x=xB, y=yB (the beam position in cm; default
+/// closest approach to the line x=x_b, y=y_b (the beam position in cm; default
 /// the z-axis — coatjava's SwimToBeamLine uses the CCDB beam offset plus the
 /// per-event raster). `pos_cm`/`mom_gev` are the position and momentum at the
 /// DC; `q` is the charge. Reversing the direction (u = -p_hat) while keeping q
 /// retraces the particle's incoming path. Returns the z at the closest
-/// approach; doca_rho is the distance to (xB, yB) there.
-SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>& pos_cm,
-                                 const std::array<double, 3>& mom_gev, double q,
-                                 double xB = 0.0, double yB = 0.0);
+/// approach; doca_rho is the distance to (x_b, y_b) there.
+auto swim_back_to_beamline(const magnetic_field& field, const std::array<double, 3>& pos_cm,
+                           const std::array<double, 3>& mom_gev, double q,
+                           double x_b = 0.0, double y_b = 0.0) -> swim_result;
 
 }  // namespace vz

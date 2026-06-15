@@ -233,21 +233,26 @@ def plot_summary(file_path: str = "vz_bins.root", out_path: str = "vz_summary.pd
 
 if __name__ == "__main__":
     import argparse
+    import os
 
     parser = argparse.ArgumentParser(
         description="Render the electron-vz (p, theta) grid figures from a "
                     "vz-swim-hist vz_bins.root.")
-    parser.add_argument("file", nargs="?", default="vz_bins.root",
-                        help="input ROOT file (default: vz_bins.root)")
+    parser.add_argument("file", nargs="?", default="output/cpp/vz_bins.root",
+                        help="input ROOT file (default: output/cpp/vz_bins.root)")
     parser.add_argument("-s", "--suffix", default="",
                         help="string inserted before the '.pdf' extension of every output "
                              "figure, e.g. --suffix _018614 -> vz_rec_swum_018614.pdf")
     cli = parser.parse_args()
 
+    out_dir = os.path.join("output", "python", "vz_bins")
+    os.makedirs(out_dir, exist_ok=True)
+
     def op(name: str) -> str:
-        """Apply the --suffix to an output filename (before the extension)."""
+        """Apply the --suffix and route the figure into output/python/vz_bins/."""
         stem, dot, ext = name.rpartition(".")
-        return f"{stem}{cli.suffix}.{ext}" if dot else f"{name}{cli.suffix}"
+        fname = f"{stem}{cli.suffix}.{ext}" if dot else f"{name}{cli.suffix}"
+        return os.path.join(out_dir, fname)
 
     plot_theta_overlay(cli.file, out_path=op("vz_theta_overlay.pdf"))
     plot_rec_swum(cli.file, out_path=op("vz_rec_swum.pdf"))

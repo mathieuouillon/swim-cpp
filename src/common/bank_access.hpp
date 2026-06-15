@@ -24,9 +24,9 @@ namespace vz {
 
 inline constexpr double DNAN = std::numeric_limits<double>::quiet_NaN();
 
-/// Row index of the first row matching `pindex` (and `det`/`layer` when given).
-inline std::optional<int> match_row(hipo::bank_view bank, int pindex, std::optional<int> det,
-                                    std::optional<int> layer) {
+/// row index of the first row matching `pindex` (and `det`/`layer` when given).
+inline auto match_row(hipo::bank_view bank, int pindex, std::optional<int> det,
+                      std::optional<int> layer) -> std::optional<int> {
     if (!bank) return std::nullopt;
     const int n = static_cast<int>(bank.rows());
     for (int k = 0; k < n; ++k) {
@@ -39,8 +39,8 @@ inline std::optional<int> match_row(hipo::bank_view bank, int pindex, std::optio
 }
 
 /// Float column from the first row matching `pindex` (+ optional `det`).
-inline std::optional<double> first_f64(hipo::bank_view bank, int pindex, std::optional<int> det,
-                                       const char* col) {
+inline auto first_f64(hipo::bank_view bank, int pindex, std::optional<int> det,
+                      const char* col) -> std::optional<double> {
     if (!bank) return std::nullopt;
     auto k = match_row(bank, pindex, det, std::nullopt);
     if (!k) return std::nullopt;
@@ -48,8 +48,8 @@ inline std::optional<double> first_f64(hipo::bank_view bank, int pindex, std::op
 }
 
 /// Float column at a specific `det` + `layer` for `pindex`.
-inline std::optional<double> layer_f64(hipo::bank_view bank, int pindex, int det, int layer,
-                                       const char* col) {
+inline auto layer_f64(hipo::bank_view bank, int pindex, int det, int layer,
+                      const char* col) -> std::optional<double> {
     if (!bank) return std::nullopt;
     auto k = match_row(bank, pindex, det, layer);
     if (!k) return std::nullopt;
@@ -58,8 +58,8 @@ inline std::optional<double> layer_f64(hipo::bank_view bank, int pindex, int det
 
 /// Sum of a float column over all rows matching `pindex` (+ optional `det`);
 /// nullopt if no row matched (distinguishes "absent" from "zero deposit").
-inline std::optional<double> sum_f64(hipo::bank_view bank, int pindex, std::optional<int> det,
-                                     const char* col) {
+inline auto sum_f64(hipo::bank_view bank, int pindex, std::optional<int> det,
+                    const char* col) -> std::optional<double> {
     if (!bank) return std::nullopt;
     double sum = 0.0;
     bool found = false;
@@ -78,7 +78,7 @@ inline std::optional<double> sum_f64(hipo::bank_view bank, int pindex, std::opti
 /// ty,q/p at the last superlayer): (sigma_p/p, sigma(tx), sigma(ty),
 /// sigma_theta [mrad], sigma_phi [mrad]). sigma_theta/phi propagate the slope
 /// covariance through the (theta,phi) Jacobian at the lab direction.
-struct CovRes {
+struct cov_res {
     double sigp;
     double sigtx;
     double sigty;
@@ -86,8 +86,8 @@ struct CovRes {
     double sigphi;
 };
 
-inline CovRes covariance_resolutions(hipo::bank_view cov, int pindex, double p, double px,
-                                     double py, double pz) {
+inline auto covariance_resolutions(hipo::bank_view cov, int pindex, double p, double px,
+                                   double py, double pz) -> cov_res {
     const double nan = DNAN;
     auto c33o = first_f64(cov, pindex, std::nullopt, "C33");
     auto c44o = first_f64(cov, pindex, std::nullopt, "C44");
@@ -123,7 +123,7 @@ inline CovRes covariance_resolutions(hipo::bank_view cov, int pindex, double p, 
     return {sigp, sigtx, sigty, sigtheta, sigphi};
 }
 
-struct PosMom {
+struct pos_mom {
     std::array<double, 3> pos;  // cm
     std::array<double, 3> mom;  // GeV
 };
@@ -131,10 +131,10 @@ struct PosMom {
 /// True (position [cm], momentum [GeV]) of the primary `target_pid` at its first
 /// DC hit (detector==DC, mpid==0, lowest avgT). MC::True positions avgX/Y/Z are
 /// mm -> /10 cm, momenta MeV -> /1000 GeV.
-inline std::optional<PosMom> mc_true_dc_state(hipo::bank_view mctrue, int target_pid) {
+inline auto mc_true_dc_state(hipo::bank_view mctrue, int target_pid) -> std::optional<pos_mom> {
     if (!mctrue) return std::nullopt;
     double best_t = std::numeric_limits<double>::infinity();
-    std::optional<PosMom> best;
+    std::optional<pos_mom> best;
     const int n = static_cast<int>(mctrue.rows());
     for (int k = 0; k < n; ++k) {
         if (mctrue.get<int>("detector", k) != DET_DC) continue;
@@ -143,7 +143,7 @@ inline std::optional<PosMom> mc_true_dc_state(hipo::bank_view mctrue, int target
         const double t = mctrue.get<double>("avgT", k);
         if (t < best_t) {
             best_t = t;
-            PosMom pm;
+            pos_mom pm;
             pm.pos = {mctrue.get<double>("avgX", k) / 10.0, mctrue.get<double>("avgY", k) / 10.0,
                       mctrue.get<double>("avgZ", k) / 10.0};
             pm.mom = {mctrue.get<double>("px", k) / 1000.0, mctrue.get<double>("py", k) / 1000.0,
@@ -157,11 +157,11 @@ inline std::optional<PosMom> mc_true_dc_state(hipo::bank_view mctrue, int target
 /// Reconstructed (position [cm], momentum [GeV]) at DC region 1 from REC::Traj:
 /// the row with detector==DC, layer==DC_LAYERS[0]. Position is already cm; the
 /// momentum is the (cx,cy,cz) cosines scaled by the reconstructed |p|.
-inline std::optional<PosMom> rec_traj_dc_state(hipo::bank_view traj, int pindex, double p) {
+inline auto rec_traj_dc_state(hipo::bank_view traj, int pindex, double p) -> std::optional<pos_mom> {
     if (!traj) return std::nullopt;
     auto k = match_row(traj, pindex, DET_DC, DC_LAYERS[0]);
     if (!k) return std::nullopt;
-    PosMom pm;
+    pos_mom pm;
     pm.pos = {traj.get<double>("x", *k), traj.get<double>("y", *k), traj.get<double>("z", *k)};
     const double cx = traj.get<double>("cx", *k);
     const double cy = traj.get<double>("cy", *k);
@@ -170,7 +170,7 @@ inline std::optional<PosMom> rec_traj_dc_state(hipo::bank_view traj, int pindex,
     return pm;
 }
 
-struct PBin {
+struct p_bin {
     double lo;
     double hi;
     int lo10;
@@ -178,7 +178,7 @@ struct PBin {
 };
 
 /// Momentum-bin edges and the `pNN_NN` label fragment (tenths of a GeV).
-inline PBin pbin(std::size_t b) {
+inline auto pbin(std::size_t b) -> p_bin {
     const double lo = MOM_MIN + static_cast<double>(b) * MOM_WIDTH;
     const double hi = lo + MOM_WIDTH;
     return {lo, hi, static_cast<int>(std::lround(lo * 10.0)), static_cast<int>(std::lround(hi * 10.0))};

@@ -23,14 +23,20 @@ __pycache__/
 *.swp
 *~
 
-# Uv tools 
+# clangd / language-server index
+.cache/
+
+# Uv tools
 /.uv/
 uv.lock
 
 # Local Claude Code tooling config
 /.claude/
 
-# Output figure and results directories
+# Generated outputs: C++ -> output/cpp/, Python -> output/python/<analysis>/
+/output/
+
+# Legacy top-level scan/results directories (pre-output/ layout)
 dc-x_scan/
 dc-z_scan/
 dc-y_scan/

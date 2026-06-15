@@ -16,26 +16,26 @@ constexpr double RTOL = 1e-6;
 constexpr double ATOL = 1e-6;
 using state_type = std::array<double, 6>;
 
-SwimResult fail() {
+auto fail() -> swim_result {
     const double nan = std::numeric_limits<double>::quiet_NaN();
-    return {nan, nan, 0.0, SwimStatus::NoMinimum};
+    return {nan, nan, 0.0, swim_status::no_minimum};
 }
 
-// Radial velocity (x-xB)*ux + (y-yB)*uy w.r.t. the beam axis at (xB, yB);
+// Radial velocity (x-x_b)*ux + (y-y_b)*uy w.r.t. the beam axis at (x_b, y_b);
 // zero at the closest approach to that line.
-inline double radial_vel(const state_type& y, double xB, double yB) {
-    return (y[0] - xB) * y[3] + (y[1] - yB) * y[4];
+inline auto radial_vel(const state_type& y, double x_b, double y_b) -> double {
+    return (y[0] - x_b) * y[3] + (y[1] - y_b) * y[4];
 }
 
-// Distance to the beam axis at (xB, yB).
-inline double beam_rho(const state_type& y, double xB, double yB) {
-    return std::sqrt((y[0] - xB) * (y[0] - xB) + (y[1] - yB) * (y[1] - yB));
+// Distance to the beam axis at (x_b, y_b).
+inline auto beam_rho(const state_type& y, double x_b, double y_b) -> double {
+    return std::sqrt((y[0] - x_b) * (y[0] - x_b) + (y[1] - y_b) * (y[1] - y_b));
 }
 }  // namespace
 
-SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>& pos_cm,
-                                 const std::array<double, 3>& mom_gev, double q, double xB,
-                                 double yB) {
+auto swim_back_to_beamline(const magnetic_field& field, const std::array<double, 3>& pos_cm,
+                           const std::array<double, 3>& mom_gev, double q, double x_b,
+                           double y_b) -> swim_result {
     const double p = std::sqrt(mom_gev[0] * mom_gev[0] + mom_gev[1] * mom_gev[1] +
                                mom_gev[2] * mom_gev[2]);
     if (!(p > 1e-6)) return fail();
@@ -59,7 +59,7 @@ SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>
         odeint::make_dense_output(ATOL, RTOL, odeint::runge_kutta_dopri5<state_type>());
     stepper.initialize(y, 0.0, 0.1);
 
-    double g_prev = radial_vel(y, xB, yB);
+    double g_prev = radial_vel(y, x_b, y_b);
     state_type y_end{};
 
     try {
@@ -73,13 +73,13 @@ SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>
             const bool capped = (t1 >= MAX_PATH_CM);
             const double t_end = capped ? MAX_PATH_CM : t1;
             stepper.calc_state(t_end, y_end);
-            const double g_cur = radial_vel(y_end, xB, yB);
+            const double g_cur = radial_vel(y_end, x_b, y_b);
 
             if ((g_prev < 0.0) != (g_cur < 0.0)) {  // radial-velocity sign change
-                auto G = [&stepper, xB, yB](double t) {
+                auto G = [&stepper, x_b, y_b](double t) {
                     state_type s;
                     stepper.calc_state(t, s);
-                    return radial_vel(s, xB, yB);
+                    return radial_vel(s, x_b, y_b);
                 };
                 std::uintmax_t maxit = 60;
                 auto tol = [](double a, double b) { return std::fabs(b - a) < 1e-9; };
@@ -87,10 +87,10 @@ SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>
                 const double s_star = 0.5 * (br.first + br.second);
                 state_type ys;
                 stepper.calc_state(s_star, ys);
-                return {ys[2], beam_rho(ys, xB, yB), s_star, SwimStatus::Converged};
+                return {ys[2], beam_rho(ys, x_b, y_b), s_star, swim_status::converged};
             }
             if (capped) {
-                return {y_end[2], beam_rho(y_end, xB, yB), MAX_PATH_CM, SwimStatus::MaxPath};
+                return {y_end[2], beam_rho(y_end, x_b, y_b), MAX_PATH_CM, swim_status::max_path};
             }
             g_prev = g_cur;
         }
@@ -98,7 +98,7 @@ SwimResult swim_back_to_beamline(const Field& field, const std::array<double, 3>
         return fail();
     }
 
-    return {y_end[2], beam_rho(y_end, xB, yB), stepper.current_time(), SwimStatus::MaxPath};
+    return {y_end[2], beam_rho(y_end, x_b, y_b), stepper.current_time(), swim_status::max_path};
 }
 
 }  // namespace vz

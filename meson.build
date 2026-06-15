@@ -48,6 +48,7 @@ endif
 # ---- project_libs MUST exist before the hipo subdir -----------------------
 project_libs = []
 subdir('external/hipo4')   # defines hipo_dep and appends to project_libs
+subdir('external/argparse')  # header-only: defines argparse_dep
 
 # ---- CERN ROOT (keg-only: discover via root-config) -----------------------
 root_config = find_program('root-config', required : true)
@@ -72,54 +73,63 @@ if not boost_dep.found()
   boost_dep = dependency('boost', required : true)
 endif
 
-src_inc = include_directories('src')
+# Shared code lives in src/common/; each program has its own src/<program>/ dir.
+common_inc = include_directories('src/common')
 
-analysis_sources = files(
-  'src/field.cpp',
-  'src/swim.cpp',
-  'src/analysis.cpp',
+# Shared translation units used by more than one program / test.
+common_field_swim = files(
+  'src/common/field.cpp',
+  'src/common/swim.cpp',
 )
 
+# ---- swim-analysis: CLAS12 v_z / PID diagnostic ---------------------------
 executable(
   'swim-analysis',
-  ['src/main.cpp'] + analysis_sources,
-  dependencies        : [hipo_dep, root_dep, boost_dep, fmt_dep],
-  include_directories : src_inc,
+  ['src/swim-analysis/main.cpp', 'src/swim-analysis/analysis.cpp'] + common_field_swim,
+  dependencies        : [hipo_dep, root_dep, boost_dep, fmt_dep, argparse_dep],
+  include_directories : [common_inc, include_directories('src/swim-analysis')],
   install             : true,
 )
 
 # ---- hipo2root: dump REC::Particle kinematics to a flat ROOT TTree ---------
 executable(
   'hipo2root',
-  ['src/hipo2root.cpp'],
-  dependencies        : [hipo_dep, root_dep, fmt_dep],
-  include_directories : src_inc,
+  ['src/hipo2root/hipo2root.cpp'],
+  dependencies        : [hipo_dep, root_dep, fmt_dep, argparse_dep],
+  include_directories : common_inc,
   install             : true,
 )
 
 # ---- vz-swim-hist: electron vz in (p,theta) bins with DC-R1 beamline swim --
 # Reads the flat particles.root TTree (no hipo4 library needed); its progress
-# bar is the project-local src/progresstracker.hpp.
+# bar is the project-local src/common/progresstracker.hpp.
 executable(
   'vz-swim-hist',
-  ['src/vz_swim_hist.cpp', 'src/swim.cpp', 'src/field.cpp'],
-  dependencies        : [root_dep, boost_dep, fmt_dep],
-  include_directories : src_inc,
+  ['src/vz-swim-hist/vz_swim_hist.cpp'] + common_field_swim,
+  dependencies        : [root_dep, boost_dep, fmt_dep, argparse_dep],
+  include_directories : common_inc,
   install             : true,
 )
 
 # ---- unit tests (no ROOT/hipo needed) -------------------------------------
 test_swim = executable(
   'test_swim',
-  ['test/test_swim.cpp', 'src/swim.cpp', 'src/field.cpp'],
+  ['test/test_swim.cpp'] + common_field_swim,
   dependencies        : [boost_dep],
-  include_directories : src_inc,
+  include_directories : common_inc,
 )
 test('swim', test_swim)
 
 test_field = executable(
   'test_field',
-  ['test/test_field.cpp', 'src/field.cpp'],
-  include_directories : src_inc,
+  ['test/test_field.cpp', 'src/common/field.cpp'],
+  include_directories : common_inc,
 )
 test('field', test_field, timeout : 60)  # loads the 8.7 MB solenoid map
+
+test_argparse = executable(
+  'test_argparse',
+  ['test/test_argparse.cpp'],
+  dependencies : argparse_dep,
+)
+test('argparse', test_argparse)

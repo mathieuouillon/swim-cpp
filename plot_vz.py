@@ -863,18 +863,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Render the v_z / PID diagnostic figures from a swim-analysis vz.root."
     )
-    parser.add_argument("file", nargs="?", default="vz.root",
-                        help="input ROOT file (default: vz.root)")
+    parser.add_argument("file", nargs="?", default="output/cpp/vz.root",
+                        help="input ROOT file (default: output/cpp/vz.root)")
     parser.add_argument("-s", "--suffix", default="",
                         help="string inserted before the '.pdf' extension of every output "
                              "figure, e.g. --suffix _rgd -> vz_confusion_matrix_rgd.pdf")
     cli = parser.parse_args()
     file_path = cli.file
 
+    out_dir = _os.path.join("output", "python", "vz")
+    _os.makedirs(out_dir, exist_ok=True)
+
     def op(name: str) -> str:
-        """Apply the --suffix to an output filename (before the extension)."""
+        """Apply the --suffix and route the figure into output/python/vz/."""
         stem, dot, ext = name.rpartition(".")
-        return f"{stem}{cli.suffix}.{ext}" if dot else f"{name}{cli.suffix}"
+        fname = f"{stem}{cli.suffix}.{ext}" if dot else f"{name}{cli.suffix}"
+        return _os.path.join(out_dir, fname)
 
     # Optional pretty progress bar; falls back to plain prints if tqdm is absent.
     try:

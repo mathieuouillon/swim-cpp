@@ -21,12 +21,12 @@
 namespace vz {
 
 /// A field the swimmer can query: lab-frame B in kG at a point in cm.
-struct Field {
-    virtual ~Field() = default;
-    virtual std::array<double, 3> b_kgauss(double x, double y, double z) const = 0;
+struct magnetic_field {
+    virtual ~magnetic_field() = default;
+    virtual auto b_kgauss(double x, double y, double z) const -> std::array<double, 3> = 0;
 };
 
-class FieldMap {
+class field_map {
 public:
     /// Load and parse a clas12-cmag binary map. Throws std::runtime_error on any
     /// format/IO error. `scale` multiplies the field; the shifts rigidly
@@ -34,34 +34,34 @@ public:
     /// z-z_shift). NOTE a transverse shift only translates the lookup point;
     /// the returned Cartesian components are not re-rotated (exact for a
     /// rigidly displaced magnet).
-    static FieldMap load(const std::string& path, double scale, double z_shift,
-                         double x_shift = 0.0, double y_shift = 0.0);
+    static auto load(const std::string& path, double scale, double z_shift,
+                     double x_shift = 0.0, double y_shift = 0.0) -> field_map;
 
     /// Lab-frame Cartesian field in kG (scale applied), or nullopt out of volume.
-    std::optional<std::array<double, 3>> b_cart(double x, double y, double z) const;
+    auto b_cart(double x, double y, double z) const -> std::optional<std::array<double, 3>>;
 
 private:
-    struct Axis {
+    struct axis {
         double min = 0.0;
         std::size_t n = 0;
         double step = 0.0;
 
-        static Axis make(double mn, double mx, std::size_t count);
+        static auto make(double mn, double mx, std::size_t count) -> axis;
         /// Lower node index and fractional offset in [0,1], or nullopt if out of
         /// range. A single-point axis (n==1) always returns (0, 0.0).
-        std::optional<std::pair<std::size_t, double>> frac(double q) const;
+        auto frac(double q) const -> std::optional<std::pair<std::size_t, double>>;
     };
 
-    FieldMap() = default;
+    field_map() = default;
 
     /// Trilinear-interpolated native components at (phi[deg], rho[cm], z[cm]),
     /// or nullopt if outside the grid box.
-    std::optional<std::array<double, 3>> interp(double phi, double rho, double z) const;
+    auto interp(double phi, double rho, double z) const -> std::optional<std::array<double, 3>>;
 
     std::uint32_t field_cs_ = 0;
-    Axis phi_{};
-    Axis rho_{};
-    Axis z_{};
+    axis phi_{};
+    axis rho_{};
+    axis z_{};
     std::vector<float> data_;  // 3 components per node
     double scale_ = 1.0;
     double x_shift_ = 0.0;
@@ -70,21 +70,21 @@ private:
 };
 
 /// Composite (torus + solenoid) field; vector sum, out-of-volume maps add 0.
-class CompositeField : public Field {
+class composite_field : public magnetic_field {
 public:
-    static CompositeField load(const std::string& torus_path, double torus_scale,
-                               const std::string& solenoid_path, double solenoid_scale,
-                               double solenoid_z_shift, double torus_z_shift = 0.0,
-                               double torus_x_shift = 0.0, double torus_y_shift = 0.0);
+    static auto load(const std::string& torus_path, double torus_scale,
+                     const std::string& solenoid_path, double solenoid_scale,
+                     double solenoid_z_shift, double torus_z_shift = 0.0,
+                     double torus_x_shift = 0.0, double torus_y_shift = 0.0) -> composite_field;
 
-    std::array<double, 3> b_kgauss(double x, double y, double z) const override;
+    auto b_kgauss(double x, double y, double z) const -> std::array<double, 3> override;
 
 private:
-    CompositeField(FieldMap torus, FieldMap solenoid)
+    composite_field(field_map torus, field_map solenoid)
         : torus_(std::move(torus)), solenoid_(std::move(solenoid)) {}
 
-    FieldMap torus_;
-    FieldMap solenoid_;
+    field_map torus_;
+    field_map solenoid_;
 };
 
 }  // namespace vz
