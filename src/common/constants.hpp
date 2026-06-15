@@ -51,7 +51,7 @@ inline constexpr double THETA_MAX = 60.0;
 
 // True if a REC::Particle status word denotes a Forward-Detector track:
 // |status| in [2000, 4000). This analysis keeps Forward-Detector tracks only.
-inline constexpr bool is_forward(int status) {
+inline constexpr auto is_forward(int status) -> bool {
     int a = status < 0 ? -status : status;
     return a >= 2000 && a < 4000;
 }
@@ -65,7 +65,7 @@ inline constexpr std::array<std::string_view, N_SPECIES> SPECIES_TEX = {
     "#pi^{+}", "#pi^{-}", "#mu^{+}", "#mu^{-}"};
 
 // Species index for a pid (pi+ 211, pi- -211, mu+ -13, mu- 13), else nullopt.
-inline constexpr std::optional<std::size_t> species_index(int pid) {
+inline constexpr auto species_index(int pid) -> std::optional<std::size_t> {
     switch (pid) {
         case 211: return 0;   // pi+
         case -211: return 1;  // pi-
@@ -76,7 +76,7 @@ inline constexpr std::optional<std::size_t> species_index(int pid) {
 }
 
 // A track variable: defines a 1-D histogram axis.
-struct Var {
+struct var {
     std::string_view tag;
     int nbins;
     double lo;
@@ -84,8 +84,8 @@ struct Var {
 };
 
 // 1-D distributions filled for reco pions in the PT_BANDS momentum bands.
-// Order MUST match the `vals` array in Analysis::fill_event.
-inline constexpr std::array<Var, 28> TRACK_VARS = {{
+// Order MUST match the `vals` array in analysis::fill_event.
+inline constexpr std::array<var, 28> TRACK_VARS = {{
     {"p", 120, 0.0, 6.0},
     {"pt", 120, 0.0, 6.0},
     {"theta", 120, 0.0, 60.0},
@@ -120,7 +120,7 @@ inline constexpr std::size_t N_TRACK_VARS = TRACK_VARS.size();
 
 // Resolution variables histogrammed per fine momentum bin across the full
 // truth x reco grid (like v_z). Order MUST match res_vals in fill_event.
-inline constexpr std::array<Var, 3> RES_VARS = {{
+inline constexpr std::array<var, 3> RES_VARS = {{
     {"sigtx", 100, 0.0, 0.003},
     {"sigty", 100, 0.0, 0.003},
     {"sigtheta", 100, 0.0, 5.0},  // mrad
@@ -140,13 +140,13 @@ inline constexpr double SWUM_MAX_DOCA_RHO = 5.0;
 
 // A momentum band for the track-variable distributions. Low- and high-p pions
 // are histogrammed separately so their shapes can be overlaid for comparison.
-struct PtBand {
+struct pt_band_def {
     std::string_view tag;
     double lo;
     double hi;
 };
 
-inline constexpr std::array<PtBand, 2> PT_BANDS = {{
+inline constexpr std::array<pt_band_def, 2> PT_BANDS = {{
     {"lo", 0.0, 1.0},
     {"hi", 3.0, 6.0},
 }};
@@ -154,7 +154,7 @@ inline constexpr std::array<PtBand, 2> PT_BANDS = {{
 inline constexpr std::size_t N_PT_BANDS = PT_BANDS.size();
 
 // Index of the momentum band a track falls in, or nullopt if between bands.
-inline constexpr std::optional<std::size_t> pt_band(double p) {
+inline constexpr auto pt_band(double p) -> std::optional<std::size_t> {
     for (std::size_t i = 0; i < PT_BANDS.size(); ++i) {
         if (p >= PT_BANDS[i].lo && p < PT_BANDS[i].hi) return i;
     }

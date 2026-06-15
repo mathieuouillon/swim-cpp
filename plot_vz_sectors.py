@@ -191,14 +191,19 @@ def plot_sectors(file_path="vz_bins.root", out_path="vz_sectors.pdf"):
 
 if __name__ == "__main__":
     import argparse
+    import os
     parser = argparse.ArgumentParser(
         description="Per-sector swum-vz diagnostic from a vz-swim-hist file.")
-    parser.add_argument("file", nargs="?", default="vz_bins.root")
+    parser.add_argument("file", nargs="?", default="output/cpp/vz_bins.root")
     parser.add_argument("-s", "--suffix", default="")
     cli = parser.parse_args()
 
+    out_dir = os.path.join("output", "python", "vz_sectors")
+    os.makedirs(out_dir, exist_ok=True)
+
     def op(name):
         stem, dot, ext = name.rpartition(".")
-        return f"{stem}{cli.suffix}.{ext}" if dot else f"{name}{cli.suffix}"
+        fname = f"{stem}{cli.suffix}.{ext}" if dot else f"{name}{cli.suffix}"
+        return os.path.join(out_dir, fname)
 
     plot_sectors(cli.file, out_path=op("vz_sectors.pdf"))

@@ -7,79 +7,65 @@
 // event index it came from. The RUN::config torus/solenoid scales are printed
 // at startup (feed them to vz-swim-hist).
 //
-// Reads with the hipo4 chain. Bank decoding runs on N worker threads (each
-// with its own banklist copy); rows are staged per event and appended to the
-// (single) TTree under a mutex, so TTree::Fill stays serial.
+// Reads with the hipo4 chain. Parallelism is by PROCESS: with --jobs N the
+// inputs are sharded across N re-exec'd single-threaded copies, each writing a
+// partial TTree, which the supervisor then merges (see process_pool.hpp).
 //
 // Usage:
-//   hipo2root <input>... [--output FILE] [--threads N] [--quiet]
+//   hipo2root <input>... [--output FILE] [--jobs N] [--quiet]
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <limits>
-#include <mutex>
 #include <string>
+#include <thread>  // std::thread::hardware_concurrency (default worker count only)
 #include <vector>
 
 #include <fmt/format.h>
 
 #include "TFile.h"
-#include "TROOT.h"
 #include "TTree.h"
 
+#include "argparse/argparse.hpp"
 #include "bank_access.hpp"
 #include "constants.hpp"
 #include "hipo4/hipo.hpp"
 #include "hipo_chain.hpp"
+#include "process_pool.hpp"
 
 namespace {
 
-struct Args {
+struct cli_args {
     std::vector<std::string> inputs;
-    std::string output = "particles.root";
-    int threads = 0;          // 0 = auto-detect hardware concurrency
+    std::string output = "output/cpp/particles.root";
+    int jobs = 0;             // 0 = one worker process per hardware thread
     bool run_config = false;  // only print RUN::config (per input file) and exit
     bool quiet = false;
+    bool worker = false;      // hidden: set by the supervisor on each re-exec
 };
 
-enum class ParseResult { Ok, Help, Error };
-
-void usage() {
-    std::fprintf(stderr,
-                 "usage: hipo2root <input>... [--output FILE] [--threads N] [--run-config] "
-                 "[--quiet]\n"
-                 "  --run-config  only print each input's RUN::config (run, torus/solenoid "
-                 "scales) and exit\n");
-}
-
-ParseResult parse_args(int argc, char** argv, Args& a, std::string& err) {
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--output" || arg == "-o") {
-            if (i + 1 >= argc) { err = "--output needs a value"; return ParseResult::Error; }
-            a.output = argv[++i];
-        } else if (arg == "--threads" || arg == "-t" || arg == "-j") {
-            if (i + 1 >= argc) { err = "--threads needs a value"; return ParseResult::Error; }
-            try { a.threads = std::stoi(argv[++i]); } catch (...) { err = "--threads must be an integer"; return ParseResult::Error; }
-        } else if (arg == "--run-config") {
-            a.run_config = true;
-        } else if (arg == "--quiet" || arg == "-q") {
-            a.quiet = true;
-        } else if (arg == "-h" || arg == "--help") {
-            return ParseResult::Help;
-        } else if (arg.size() > 1 && arg[0] == '-') {
-            err = "unknown flag: " + arg;
-            return ParseResult::Error;
-        } else {
-            a.inputs.push_back(arg);
-        }
-    }
-    if (a.inputs.empty()) {
-        err = "missing <input> (.hipo file(s))";
-        return ParseResult::Error;
-    }
-    return ParseResult::Ok;
+// Build the command-line parser (external/argparse). --worker is a hidden marker
+// the supervisor sets on each re-exec'd child.
+auto build_parser() -> argparse::parser {
+    argparse::parser p("hipo2root",
+                       "Dump REC::Particle kinematics from CLAS12 HIPO files into a flat ROOT TTree.");
+    p.add_argument("inputs")
+        .nargs(argparse::nargs::one_or_more)
+        .metavar("input")
+        .help(".hipo file(s)");
+    p.add_argument("-o", "--output")
+        .default_value("output/cpp/particles.root")
+        .help("output ROOT file");
+    p.add_argument("-j", "--jobs", "-t", "--threads")
+        .default_value(0)
+        .help("worker processes, 0 = one per hardware thread (--threads is an alias)");
+    p.add_argument("--run-config")
+        .flag()
+        .help("only print each input's RUN::config (run, torus/solenoid scales) and exit");
+    p.add_argument("-q", "--quiet").flag().help("suppress the progress bar");
+    p.add_argument("--worker").flag().hidden();  // re-exec'd worker marker
+    return p;
 }
 
 // Banks the dump reads. REC::Particle is required; REC::Traj and
@@ -89,7 +75,7 @@ const std::vector<std::string> WANTED_BANKS = {"REC::Particle", "REC::Traj",
 
 // Keep only the wanted banks present in the first file's dictionary, so the
 // banklist construction never throws on a missing schema.
-std::vector<std::string> present_banks(const std::string& file) {
+auto present_banks(const std::string& file) -> std::vector<std::string> {
     std::vector<std::string> present;
     auto f = hipo::file::open(file);
     if (!f) {
@@ -106,7 +92,7 @@ std::vector<std::string> present_banks(const std::string& file) {
 // Print the RUN::config torus/solenoid scale factors from the first file (what
 // the reconstruction's swimmer used — pass them to vz-swim-hist as
 // --torus-scale/--solenoid-scale).
-void print_run_config(const std::string& file) {
+auto print_run_config(const std::string& file) -> void {
     auto fr = hipo::file::open(file);
     if (!fr) {
         std::fprintf(stderr, "warning: cannot open '%s': %s\n", file.c_str(),
@@ -130,7 +116,7 @@ void print_run_config(const std::string& file) {
             const double solenoid = c.get<double>("solenoid", 0);
             fmt::print("RUN::config: run {}, torus scale {}, solenoid scale {}\n",
                        c.get<int>("run", 0), torus, solenoid);
-            // Our FieldMap orientation is opposite to cnuphys's for both
+            // Our field_map orientation is opposite to cnuphys's for both
             // magnets (see docs/coatjava_vz.md), so the vz-swim-hist flags are:
             fmt::print("  -> vz-swim-hist: --torus-scale {} --solenoid-scale {}\n", -torus,
                        -solenoid);
@@ -146,7 +132,7 @@ void print_run_config(const std::string& file) {
 // the rows into the branch buffers and Fill the tree under a mutex (serial —
 // TTree::Fill is not thread-safe). A named functor (not a lambda) so the
 // branch buffers it owns are addressable by TTree::Branch.
-struct ParticleDumper {
+struct particle_dumper {
     long rec_particle = -1;  // banklist index of REC::Particle
     long rec_traj = -1;      // banklist index of REC::Traj (-1 = absent)
     long raster_pos = -1;    // banklist index of RASTER::position (-1 = absent)
@@ -167,11 +153,10 @@ struct ParticleDumper {
     // absent. The reconstruction adds this to the CCDB beam offset.
     Float_t raster_x = 0.f, raster_y = 0.f;
 
-    long long n_particles = 0;  // guarded by fill_mutex
-    std::mutex fill_mutex;
+    long long n_particles = 0;
 
-    // One decoded REC::Particle row, staged before the locked Fill.
-    struct Row {
+    // One decoded REC::Particle row, staged before the Fill.
+    struct row {
         Int_t pid;
         Float_t px, py, pz, vz;
         Int_t status;
@@ -179,7 +164,7 @@ struct ParticleDumper {
         Float_t dc3_x, dc3_y, dc3_z, dc3_cx, dc3_cy, dc3_cz;
     };
 
-    void operator()(vz::BankList& bl, int /*file_idx*/, long event_idx) {
+    auto operator()(vz::bank_list& bl, int /*file_idx*/, long event_idx) -> void {
         if (rec_particle < 0) return;
         hipo::bank_view rec = bl[rec_particle];
         hipo::bank_view traj = rec_traj >= 0 ? bl[rec_traj] : hipo::bank_view{};
@@ -193,13 +178,12 @@ struct ParticleDumper {
             ras_y = static_cast<Float_t>(raster.get<double>("y", 0));
         }
 
-        // Decode in parallel into a per-thread staging buffer (reused across
-        // events to avoid a per-event allocation).
-        thread_local std::vector<Row> rows;
+        // Decode each REC::Particle row into a staging buffer.
+        std::vector<row> rows;
         rows.clear();
         rows.reserve(static_cast<std::size_t>(n));
         for (int i = 0; i < n; ++i) {
-            Row r;
+            row r;
             r.pid = rec.get<int>("pid", i);
             r.px = static_cast<Float_t>(rec.get<double>("px", i));
             r.py = static_cast<Float_t>(rec.get<double>("py", i));
@@ -228,12 +212,11 @@ struct ParticleDumper {
         }
         if (rows.empty()) return;
 
-        // Serial section: copy into the branch buffers and Fill.
-        std::lock_guard lock(fill_mutex);
+        // Copy into the branch buffers and Fill.
         event = static_cast<Long64_t>(event_idx);
         raster_x = ras_x;
         raster_y = ras_y;
-        for (const Row& r : rows) {
+        for (const row& r : rows) {
             pid = r.pid;
             px = r.px;
             py = r.py;
@@ -258,43 +241,14 @@ struct ParticleDumper {
     }
 };
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    // ROOT global state: enable internal locks before any worker threads exist
-    // (TTree::Fill itself is additionally serialized by ParticleDumper's mutex).
-    ROOT::EnableThreadSafety();
-
-    Args args;
-    std::string err;
-    switch (parse_args(argc, argv, args, err)) {
-        case ParseResult::Help:
-            usage();
-            return 0;
-        case ParseResult::Error:
-            std::fprintf(stderr, "error: %s\n\n", err.c_str());
-            usage();
-            return 2;
-        case ParseResult::Ok:
-            break;
-    }
-
-    // --run-config: just report each input's RUN::config (run number, torus and
-    // solenoid scale factors) without producing a tree.
-    if (args.run_config) {
-        for (const auto& p : args.inputs) {
-            if (!std::filesystem::exists(p)) {
-                std::fprintf(stderr, "error: no such file: %s\n", p.c_str());
-                continue;
-            }
-            fmt::print("{}:\n  ", p);
-            print_run_config(p);
-        }
-        return 0;
-    }
-
-    vz::Chain ch(args.threads, /*progress=*/!args.quiet, /*verbose=*/false);
-    for (const auto& p : args.inputs) ch.add(p);
+// One single-threaded pass over `paths`: dump every REC::Particle row into a
+// flat TTree in args.output. In worker mode the chatter is suppressed (the
+// supervisor reports); a lone --jobs 1 run prints the inputs, RUN::config, and
+// total itself.
+auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool worker_mode)
+    -> int {
+    vz::chain ch(/*progress=*/!args.quiet && !worker_mode, /*verbose=*/false);
+    for (const auto& p : paths) ch.add(p);
     try {
         ch.open(/*validate_all=*/true);
     } catch (const std::exception& e) {
@@ -302,18 +256,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::vector<std::string> present = present_banks(args.inputs[0]);
+    std::vector<std::string> present = present_banks(paths[0]);
     if (std::find(present.begin(), present.end(), "REC::Particle") == present.end()) {
-        std::fprintf(stderr, "error: REC::Particle not found in '%s'\n", args.inputs[0].c_str());
+        std::fprintf(stderr, "error: REC::Particle not found in '%s'\n", paths[0].c_str());
         return 1;
     }
 
-    fmt::print("inputs: {} file(s), {} events\n", ch.size(), ch.total_events());
-    print_run_config(args.inputs[0]);
+    if (!worker_mode) {
+        fmt::print("inputs: {} file(s), {} events\n", ch.size(), ch.total_events());
+        print_run_config(paths[0]);
+    }
 
-    vz::BankList banks;
+    vz::bank_list banks;
     try {
-        banks = ch.getBanks(present);
+        banks = ch.get_banks(present);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: could not build banklist: %s\n", e.what());
         return 1;
@@ -326,16 +282,16 @@ int main(int argc, char** argv) {
     }
     TTree tree("particles", "REC::Particle kinematics");
 
-    // Resolve bank indices (absent optional bank -> -1, like vz::BankIndex).
+    // Resolve bank indices (absent optional bank -> -1, like vz::bank_index).
     auto bank_index = [&](const char* n) -> long {
         try {
-            return vz::getBanklistIndex(banks, n);
+            return vz::get_banklist_index(banks, n);
         } catch (const std::exception&) {
             return -1;
         }
     };
 
-    ParticleDumper dumper;
+    particle_dumper dumper;
     dumper.rec_particle = bank_index("REC::Particle");
     dumper.rec_traj = bank_index("REC::Traj");
     dumper.raster_pos = bank_index("RASTER::position");
@@ -367,6 +323,121 @@ int main(int argc, char** argv) {
     tree.Write();
     fout.Close();
 
-    fmt::print("wrote {} particles to {}\n", dumper.n_particles, args.output);
+    if (!worker_mode) fmt::print("wrote {} particles to {}\n", dumper.n_particles, args.output);
     return 0;
+}
+
+// Supervisor: shard `paths` round-robin across `n_workers` re-exec'd workers,
+// merge their partial TTrees into args.output, and report the total. (With
+// --jobs>1 the per-row `event` index is per-worker, not globally unique; that
+// branch is diagnostic and unused downstream — run --jobs 1 if you need it
+// global.)
+auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::string>& paths,
+                    int n_workers) -> int {
+    std::vector<std::vector<std::string>> shards(static_cast<std::size_t>(n_workers));
+    for (std::size_t i = 0; i < paths.size(); ++i)
+        shards[i % static_cast<std::size_t>(n_workers)].push_back(paths[i]);
+
+    const std::string exe = vz::self_exe_path(argv[0]);
+    std::string dir;
+    try {
+        dir = vz::make_temp_dir("hipo2root");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+
+    std::vector<std::string> parts;
+    std::vector<std::vector<std::string>> argvs;
+    for (int i = 0; i < n_workers; ++i) {
+        const std::string part = fmt::format("{}/part-{:03}.root", dir, i);
+        parts.push_back(part);
+        std::vector<std::string> av = {exe, "--jobs", "1", "--worker", "--quiet", "--output", part};
+        for (const auto& p : shards[static_cast<std::size_t>(i)]) av.push_back(p);
+        argvs.push_back(std::move(av));
+    }
+
+    fmt::print("hipo2root: {} worker process(es) over {} file(s) -> {}\n", n_workers, paths.size(),
+               args.output);
+    print_run_config(paths[0]);
+
+    if (!vz::run_workers(argvs)) {
+        std::fprintf(stderr, "error: one or more workers failed; '%s' not written\n",
+                     args.output.c_str());
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        return 1;
+    }
+    try {
+        vz::merge_root_files(parts, args.output);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: merge failed: %s\n", e.what());
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        return 1;
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+
+    long long total = 0;
+    {
+        TFile f(args.output.c_str());
+        if (auto* t = dynamic_cast<TTree*>(f.Get("particles"))) total = t->GetEntries();
+    }
+    fmt::print("wrote {} particles to {}\n", total, args.output);
+    return 0;
+}
+
+}  // namespace
+
+auto main(int argc, char** argv) -> int {
+    argparse::parser p = build_parser();
+    try {
+        p.parse(argc, argv);
+    } catch (const argparse::help_requested&) {
+        fmt::print("{}", p.help_text());
+        return 0;
+    } catch (const argparse::error& e) {
+        fmt::print(stderr, "error: {}\n\n{}", e.what(), p.usage());
+        return 2;
+    }
+
+    cli_args args;
+    args.inputs = p.get<std::vector<std::string>>("inputs");
+    args.output = p.get<std::string>("--output");
+    args.jobs = p.get<int>("--jobs");
+    args.run_config = p.get<bool>("--run-config");
+    args.quiet = p.get<bool>("--quiet");
+    args.worker = p.get<bool>("--worker");
+
+    // --run-config: just report each input's RUN::config (run number, torus and
+    // solenoid scale factors) without producing a tree.
+    if (args.run_config) {
+        for (const auto& p : args.inputs) {
+            if (!std::filesystem::exists(p)) {
+                std::fprintf(stderr, "error: no such file: %s\n", p.c_str());
+                continue;
+            }
+            fmt::print("{}:\n  ", p);
+            print_run_config(p);
+        }
+        return 0;
+    }
+
+    if (args.inputs.empty()) {
+        std::fprintf(stderr, "error: no input files\n");
+        return 1;
+    }
+
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const int want = args.jobs > 0 ? args.jobs : static_cast<int>(hw);
+    const int n_workers = std::min(want, static_cast<int>(args.inputs.size()));
+
+    // Ensure the output directory (default output/cpp/) exists before any write.
+    vz::ensure_parent_dir(args.output);
+
+    // A worker, or any run resolving to a single shard, dumps in-process;
+    // otherwise supervise N re-exec'd workers.
+    if (args.worker || n_workers <= 1) return run_dump(args, args.inputs, args.worker);
+    return run_supervisor(args, argv, args.inputs, n_workers);
 }

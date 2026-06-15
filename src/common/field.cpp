@@ -16,18 +16,18 @@ constexpr std::uint32_t MAGIC = 0x0ced;
 constexpr std::size_t HEADER_BYTES = 80;
 constexpr std::uint32_t FIELD_CS_CYL = 0;
 
-inline double lerp(double a, double b, double t) { return a * (1.0 - t) + b * t; }
+inline auto lerp(double a, double b, double t) -> double { return a * (1.0 - t) + b * t; }
 }  // namespace
 
-FieldMap::Axis FieldMap::Axis::make(double mn, double mx, std::size_t count) {
-    Axis a;
+auto field_map::axis::make(double mn, double mx, std::size_t count) -> field_map::axis {
+    axis a;
     a.min = mn;
     a.n = count;
     a.step = count > 1 ? (mx - mn) / (static_cast<double>(count) - 1.0) : 0.0;
     return a;
 }
 
-std::optional<std::pair<std::size_t, double>> FieldMap::Axis::frac(double q) const {
+auto field_map::axis::frac(double q) const -> std::optional<std::pair<std::size_t, double>> {
     if (n == 1) return std::make_pair(std::size_t{0}, 0.0);
     double f = (q - min) / step;
     if (f < 0.0 || f > static_cast<double>(n - 1)) return std::nullopt;
@@ -36,8 +36,8 @@ std::optional<std::pair<std::size_t, double>> FieldMap::Axis::frac(double q) con
     return std::make_pair(i, f - static_cast<double>(i));
 }
 
-FieldMap FieldMap::load(const std::string& path, double scale, double z_shift, double x_shift,
-                        double y_shift) {
+auto field_map::load(const std::string& path, double scale, double z_shift, double x_shift,
+                     double y_shift) -> field_map {
     std::ifstream in(path, std::ios::binary | std::ios::ate);
     if (!in) throw std::runtime_error("cannot open field map: " + path);
     const std::streamsize size = in.tellg();
@@ -90,9 +90,9 @@ FieldMap FieldMap::load(const std::string& path, double scale, double z_shift, d
         throw std::runtime_error("expected cylindrical grid in cm/deg/kG: " + path);
     }
 
-    Axis phi = Axis::make(rf(24), rf(28), static_cast<std::size_t>(ru(32)));
-    Axis rho = Axis::make(rf(36), rf(40), static_cast<std::size_t>(ru(44)));
-    Axis z = Axis::make(rf(48), rf(52), static_cast<std::size_t>(ru(56)));
+    axis phi = axis::make(rf(24), rf(28), static_cast<std::size_t>(ru(32)));
+    axis rho = axis::make(rf(36), rf(40), static_cast<std::size_t>(ru(44)));
+    axis z = axis::make(rf(48), rf(52), static_cast<std::size_t>(ru(56)));
 
     std::size_t n_nodes = phi.n * rho.n * z.n;
     std::size_t expect = HEADER_BYTES + 12 * n_nodes;
@@ -102,7 +102,7 @@ FieldMap FieldMap::load(const std::string& path, double scale, double z_shift, d
     }
 
     std::size_t n = 3 * n_nodes;
-    FieldMap m;
+    field_map m;
     m.field_cs_ = field_cs;
     m.phi_ = phi;
     m.rho_ = rho;
@@ -120,7 +120,7 @@ FieldMap FieldMap::load(const std::string& path, double scale, double z_shift, d
     return m;
 }
 
-std::optional<std::array<double, 3>> FieldMap::interp(double phi, double rho, double z) const {
+auto field_map::interp(double phi, double rho, double z) const -> std::optional<std::array<double, 3>> {
     auto fp_opt = phi_.frac(phi);
     if (!fp_opt) return std::nullopt;
     auto fr_opt = rho_.frac(rho);
@@ -154,7 +154,7 @@ std::optional<std::array<double, 3>> FieldMap::interp(double phi, double rho, do
     return out;
 }
 
-std::optional<std::array<double, 3>> FieldMap::b_cart(double x, double y, double z) const {
+auto field_map::b_cart(double x, double y, double z) const -> std::optional<std::array<double, 3>> {
     // A rigidly translated map: look up the field at the point in the map's own
     // (unshifted) frame, i.e. the lab point minus the shift.
     x -= x_shift_;
@@ -179,16 +179,16 @@ std::optional<std::array<double, 3>> FieldMap::b_cart(double x, double y, double
     return std::array<double, 3>{v[0] * scale_, v[1] * scale_, v[2] * scale_};
 }
 
-CompositeField CompositeField::load(const std::string& torus_path, double torus_scale,
-                                    const std::string& solenoid_path, double solenoid_scale,
-                                    double solenoid_z_shift, double torus_z_shift,
-                                    double torus_x_shift, double torus_y_shift) {
-    return CompositeField(
-        FieldMap::load(torus_path, torus_scale, torus_z_shift, torus_x_shift, torus_y_shift),
-        FieldMap::load(solenoid_path, solenoid_scale, solenoid_z_shift));
+auto composite_field::load(const std::string& torus_path, double torus_scale,
+                           const std::string& solenoid_path, double solenoid_scale,
+                           double solenoid_z_shift, double torus_z_shift,
+                           double torus_x_shift, double torus_y_shift) -> composite_field {
+    return composite_field(
+        field_map::load(torus_path, torus_scale, torus_z_shift, torus_x_shift, torus_y_shift),
+        field_map::load(solenoid_path, solenoid_scale, solenoid_z_shift));
 }
 
-std::array<double, 3> CompositeField::b_kgauss(double x, double y, double z) const {
+auto composite_field::b_kgauss(double x, double y, double z) const -> std::array<double, 3> {
     std::array<double, 3> t = torus_.b_cart(x, y, z).value_or(std::array<double, 3>{0.0, 0.0, 0.0});
     std::array<double, 3> s =
         solenoid_.b_cart(x, y, z).value_or(std::array<double, 3>{0.0, 0.0, 0.0});

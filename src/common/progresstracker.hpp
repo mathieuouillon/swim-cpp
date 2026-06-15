@@ -29,9 +29,9 @@ inline std::recursive_mutex& get_stdout_mutex() {
 /// 
 ///  @brief Thread-safe progress tracker with visual progress bar.
 ///
-class ProgressTracker {
+class progress_tracker {
    public:
-    struct Config {
+    struct config {
         std::size_t bar_width;
         bool show_eta;
         bool show_rate;
@@ -40,7 +40,7 @@ class ProgressTracker {
         std::string label;
         std::chrono::milliseconds update_interval;
 
-        Config()
+        config()
             : bar_width(50), show_eta(true), show_rate(true), use_colors(true), use_gradient(true), label("Processing"), update_interval(100) {}
     };
 
@@ -50,15 +50,15 @@ class ProgressTracker {
     ///  @param config Display configuration
     ///  @throws std::invalid_argument if total is 0
     ///
-    explicit ProgressTracker(std::size_t total, Config config = {});
+    explicit progress_tracker(std::size_t total, config config = {});
 
-    ~ProgressTracker() noexcept;
+    ~progress_tracker() noexcept;
 
     // Non-copyable, move-only
-    ProgressTracker(const ProgressTracker&) = delete;
-    ProgressTracker& operator=(const ProgressTracker&) = delete;
-    ProgressTracker(ProgressTracker&&) noexcept;
-    ProgressTracker& operator=(ProgressTracker&&) noexcept;
+    progress_tracker(const progress_tracker&) = delete;
+    progress_tracker& operator=(const progress_tracker&) = delete;
+    progress_tracker(progress_tracker&&) noexcept;
+    progress_tracker& operator=(progress_tracker&&) noexcept;
 
     ///
     ///  @brief Increments the progress counter (thread-safe, no immediate display update).
@@ -119,7 +119,7 @@ class ProgressTracker {
 
    private:
     // ANSI escape codes
-    struct AnsiCodes {
+    struct ansi_codes {
         static constexpr std::string_view CLEAR_LINE = "\r\033[K";
         static constexpr std::string_view RESET = "\033[0m";
         static constexpr std::string_view BOLD = "\033[1m";
@@ -169,7 +169,7 @@ class ProgressTracker {
     const std::size_t m_total;
     std::atomic<std::size_t> m_processed{0};
     std::chrono::steady_clock::time_point m_start_time;
-    Config m_config;
+    config m_config;
     mutable std::mutex m_display_mutex;
     bool m_finished{false};
     mutable std::size_t m_spinner_index{0};
@@ -179,23 +179,23 @@ class ProgressTracker {
     std::thread m_update_thread;
 };
 
-inline ProgressTracker::ProgressTracker(std::size_t total, Config config)
+inline progress_tracker::progress_tracker(std::size_t total, config config)
     : m_total{total}, m_start_time{std::chrono::steady_clock::now()}, m_config{config} {
-    if (total == 0) throw std::invalid_argument("ProgressTracker: total must be greater than 0");
+    if (total == 0) throw std::invalid_argument("progress_tracker: total must be greater than 0");
 }
 
-inline ProgressTracker::~ProgressTracker() noexcept {
+inline progress_tracker::~progress_tracker() noexcept {
     stop_update_thread();
     if (!m_finished) clear_line();
 }
 
-inline ProgressTracker::ProgressTracker(ProgressTracker&& other) noexcept
+inline progress_tracker::progress_tracker(progress_tracker&& other) noexcept
     : m_total{other.m_total}, m_processed{other.m_processed.load(std::memory_order_acquire)}, m_start_time{other.m_start_time}, m_config{other.m_config}, m_finished{other.m_finished} {
     other.stop_update_thread();
     other.m_finished = true;
 }
 
-inline ProgressTracker& ProgressTracker::operator=(ProgressTracker&& other) noexcept {
+inline progress_tracker& progress_tracker::operator=(progress_tracker&& other) noexcept {
     if (this != &other) {
         stop_update_thread();
         if (!m_finished) clear_line();
@@ -212,31 +212,31 @@ inline ProgressTracker& ProgressTracker::operator=(ProgressTracker&& other) noex
     return *this;
 }
 
-inline auto ProgressTracker::increment() noexcept -> void {
+inline auto progress_tracker::increment() noexcept -> void {
     m_processed.fetch_add(1, std::memory_order_acq_rel);
 }
 
-inline auto ProgressTracker::add(std::size_t count) noexcept -> void {
+inline auto progress_tracker::add(std::size_t count) noexcept -> void {
     m_processed.fetch_add(count, std::memory_order_acq_rel);
 }
 
-inline auto ProgressTracker::get_progress() const noexcept -> double {
+inline auto progress_tracker::get_progress() const noexcept -> double {
     const auto current = m_processed.load(std::memory_order_acquire);
     return m_total > 0 ? static_cast<double>(current) / static_cast<double>(m_total) : 0.0;
 }
 
-inline auto ProgressTracker::get_elapsed() const noexcept -> std::chrono::seconds {
+inline auto progress_tracker::get_elapsed() const noexcept -> std::chrono::seconds {
     const auto elapsed = std::chrono::steady_clock::now() - m_start_time;
     return std::chrono::duration_cast<std::chrono::seconds>(elapsed);
 }
 
-inline auto ProgressTracker::calculate_rate() const noexcept -> double {
+inline auto progress_tracker::calculate_rate() const noexcept -> double {
     const auto elapsed = get_elapsed().count();
     const auto current = m_processed.load(std::memory_order_acquire);
     return elapsed > 0 ? static_cast<double>(current) / static_cast<double>(elapsed) : 0.0;
 }
 
-inline auto ProgressTracker::calculate_eta() const noexcept -> std::chrono::seconds {
+inline auto progress_tracker::calculate_eta() const noexcept -> std::chrono::seconds {
     const auto current = m_processed.load(std::memory_order_acquire);
     const auto rate = calculate_rate();
 
@@ -247,7 +247,7 @@ inline auto ProgressTracker::calculate_eta() const noexcept -> std::chrono::seco
     return std::chrono::seconds{0};
 }
 
-inline auto ProgressTracker::format_duration(std::chrono::seconds duration) noexcept -> std::string {
+inline auto progress_tracker::format_duration(std::chrono::seconds duration) noexcept -> std::string {
     const auto m_totalseconds = duration.count();
 
     if (m_totalseconds < 60) return fmt::format("{}s", m_totalseconds);
@@ -262,27 +262,27 @@ inline auto ProgressTracker::format_duration(std::chrono::seconds duration) noex
     return fmt::format("{}h {:02d}m", hours, minutes);
 }
 
-inline auto ProgressTracker::format_number(std::size_t num) noexcept -> std::string {
+inline auto progress_tracker::format_number(std::size_t num) noexcept -> std::string {
     if (num < 1000) return fmt::format("{}", num);
     if (num < 1000000) return fmt::format("{:.1f}k", num / 1000.0);
     return fmt::format("{:.1f}M", num / 1000000.0);
 }
 
-inline auto ProgressTracker::clear_line() noexcept -> void {
+inline auto progress_tracker::clear_line() noexcept -> void {
     std::lock_guard lock{detail::get_stdout_mutex()};
     try {
-        fmt::print("{}", AnsiCodes::CLEAR_LINE);
+        fmt::print("{}", ansi_codes::CLEAR_LINE);
         std::cout.flush();
     } catch (...) {
     }
 }
 
-inline auto ProgressTracker::get_progress_color() const noexcept -> std::string_view {
-    if (!m_config.use_colors || !m_config.use_gradient) return AnsiCodes::GREEN;
-    return AnsiCodes::BRIGHT_GREEN;
+inline auto progress_tracker::get_progress_color() const noexcept -> std::string_view {
+    if (!m_config.use_colors || !m_config.use_gradient) return ansi_codes::GREEN;
+    return ansi_codes::BRIGHT_GREEN;
 }
 
-inline auto ProgressTracker::render_bar(double progress) const noexcept -> void {
+inline auto progress_tracker::render_bar(double progress) const noexcept -> void {
     std::lock_guard lock{detail::get_stdout_mutex()};
     try {
         const auto& colors = m_config.use_colors;
@@ -294,9 +294,9 @@ inline auto ProgressTracker::render_bar(double progress) const noexcept -> void 
         const auto partial_block_idx = static_cast<std::size_t>(remainder * 8.0);
 
         // Left bracket with color
-        if (colors) fmt::print("{}", AnsiCodes::DIM);
+        if (colors) fmt::print("{}", ansi_codes::DIM);
         fmt::print("╢");
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
 
         // Render progress bar with gradient
         for (std::size_t i = 0; i < m_config.bar_width; ++i) {
@@ -311,24 +311,24 @@ inline auto ProgressTracker::render_bar(double progress) const noexcept -> void 
                 }
                 fmt::print("{}", BLOCK_CHARS[partial_block_idx]);
             } else {
-                if (colors) fmt::print("{}", AnsiCodes::DIM);
+                if (colors) fmt::print("{}", ansi_codes::DIM);
                 fmt::print("░");
             }
         }
 
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
 
         // Right bracket
-        if (colors) fmt::print("{}", AnsiCodes::DIM);
+        if (colors) fmt::print("{}", ansi_codes::DIM);
         fmt::print("╟");
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
         fmt::print(" ");
 
     } catch (...) {
     }
 }
 
-inline auto ProgressTracker::update_display() noexcept -> void {
+inline auto progress_tracker::update_display() noexcept -> void {
     std::lock_guard lock{m_display_mutex};
 
     if (m_finished) return;
@@ -346,23 +346,23 @@ inline auto ProgressTracker::update_display() noexcept -> void {
 
         // Spinner animation
         if (progress < 1.0) {
-            if (colors) fmt::print("{}", AnsiCodes::BRIGHT_CYAN);
+            if (colors) fmt::print("{}", ansi_codes::BRIGHT_CYAN);
             fmt::print("{}", SPINNER_CHARS[m_spinner_index % SPINNER_CHARS.size()]);
             m_spinner_index++;
-            if (colors) fmt::print("{}", AnsiCodes::RESET);
+            if (colors) fmt::print("{}", ansi_codes::RESET);
             fmt::print(" ");
         } else {
-            if (colors) fmt::print("{}", AnsiCodes::BRIGHT_GREEN);
+            if (colors) fmt::print("{}", ansi_codes::BRIGHT_GREEN);
             fmt::print("✓");
-            if (colors) fmt::print("{}", AnsiCodes::RESET);
+            if (colors) fmt::print("{}", ansi_codes::RESET);
             fmt::print(" ");
         }
 
         // Label
         if (!m_config.label.empty()) {
-            if (colors) fmt::print("{}", AnsiCodes::BOLD);
+            if (colors) fmt::print("{}", ansi_codes::BOLD);
             fmt::print("{}", m_config.label);
-            if (colors) fmt::print("{}", AnsiCodes::RESET);
+            if (colors) fmt::print("{}", ansi_codes::RESET);
             fmt::print(" ");
         }
 
@@ -370,56 +370,56 @@ inline auto ProgressTracker::update_display() noexcept -> void {
 
         // Percentage with enhanced styling
         if (progress >= 1.0) {
-            if (colors) fmt::print("{}{}", AnsiCodes::BRIGHT_GREEN, AnsiCodes::BOLD);
+            if (colors) fmt::print("{}{}", ansi_codes::BRIGHT_GREEN, ansi_codes::BOLD);
             fmt::print("100%");
-            if (colors) fmt::print("{}", AnsiCodes::RESET);
+            if (colors) fmt::print("{}", ansi_codes::RESET);
         } else {
             if (colors) fmt::print("{}", get_progress_color());
             fmt::print("{:>3.0f}%", progress * 100.0);
-            if (colors) fmt::print("{}", AnsiCodes::RESET);
+            if (colors) fmt::print("{}", ansi_codes::RESET);
         }
 
         // Count with dividers
         fmt::print(" ");
-        if (colors) fmt::print("{}", AnsiCodes::DIM);
+        if (colors) fmt::print("{}", ansi_codes::DIM);
         fmt::print("│");
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
         fmt::print(" ");
 
-        if (colors) fmt::print("{}", AnsiCodes::BRIGHT_WHITE);
+        if (colors) fmt::print("{}", ansi_codes::BRIGHT_WHITE);
         fmt::print("{}", format_number(current));
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
 
-        if (colors) fmt::print("{}", AnsiCodes::DIM);
+        if (colors) fmt::print("{}", ansi_codes::DIM);
         fmt::print("/");
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
 
-        if (colors) fmt::print("{}", AnsiCodes::BRIGHT_CYAN);
+        if (colors) fmt::print("{}", ansi_codes::BRIGHT_CYAN);
         fmt::print("{}", format_number(m_total));
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
 
         // Elapsed time
         fmt::print(" ");
-        if (colors) fmt::print("{}", AnsiCodes::DIM);
+        if (colors) fmt::print("{}", ansi_codes::DIM);
         fmt::print("│ ⏱");
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
         fmt::print(" ");
-        if (colors) fmt::print("{}", AnsiCodes::MAGENTA);
+        if (colors) fmt::print("{}", ansi_codes::MAGENTA);
         fmt::print("{}", format_duration(elapsed));
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
 
         // ETA
         if (m_config.show_eta && current < m_total) {
             const auto eta = calculate_eta();
             if (eta.count() > 0) {
                 fmt::print(" ");
-                if (colors) fmt::print("{}", AnsiCodes::DIM);
+                if (colors) fmt::print("{}", ansi_codes::DIM);
                 fmt::print("│ ⏳");
-                if (colors) fmt::print("{}", AnsiCodes::RESET);
+                if (colors) fmt::print("{}", ansi_codes::RESET);
                 fmt::print(" ");
-                if (colors) fmt::print("{}", AnsiCodes::YELLOW);
+                if (colors) fmt::print("{}", ansi_codes::YELLOW);
                 fmt::print("{}", format_duration(eta));
-                if (colors) fmt::print("{}", AnsiCodes::RESET);
+                if (colors) fmt::print("{}", ansi_codes::RESET);
             }
         }
 
@@ -428,13 +428,13 @@ inline auto ProgressTracker::update_display() noexcept -> void {
             const auto rate = calculate_rate();
             if (rate > 0.0) {
                 fmt::print(" ");
-                if (colors) fmt::print("{}", AnsiCodes::DIM);
+                if (colors) fmt::print("{}", ansi_codes::DIM);
                 fmt::print("│ ⚡");
-                if (colors) fmt::print("{}", AnsiCodes::RESET);
+                if (colors) fmt::print("{}", ansi_codes::RESET);
                 fmt::print(" ");
-                if (colors) fmt::print("{}", AnsiCodes::BRIGHT_MAGENTA);
+                if (colors) fmt::print("{}", ansi_codes::BRIGHT_MAGENTA);
                 fmt::print("{:.1f}/s", rate);
-                if (colors) fmt::print("{}", AnsiCodes::RESET);
+                if (colors) fmt::print("{}", ansi_codes::RESET);
             }
         }
 
@@ -444,7 +444,7 @@ inline auto ProgressTracker::update_display() noexcept -> void {
     }
 }
 
-inline auto ProgressTracker::update_loop() noexcept -> void {
+inline auto progress_tracker::update_loop() noexcept -> void {
     while (!m_should_stop.load(std::memory_order_acquire)) {
         update_display();
         if (m_processed.load(std::memory_order_acquire) >= m_total) break;
@@ -454,22 +454,22 @@ inline auto ProgressTracker::update_loop() noexcept -> void {
     update_display();
 }
 
-inline auto ProgressTracker::start() noexcept -> void {
+inline auto progress_tracker::start() noexcept -> void {
     if (!m_update_thread.joinable() && !m_finished) {
         m_should_stop.store(false, std::memory_order_release);
         update_display();
-        m_update_thread = std::thread(&ProgressTracker::update_loop, this);
+        m_update_thread = std::thread(&progress_tracker::update_loop, this);
     }
 }
 
-inline auto ProgressTracker::stop_update_thread() noexcept -> void {
+inline auto progress_tracker::stop_update_thread() noexcept -> void {
     if (m_update_thread.joinable()) {
         m_should_stop.store(true, std::memory_order_release);
         m_update_thread.join();
     }
 }
 
-inline auto ProgressTracker::finish() noexcept -> void {
+inline auto progress_tracker::finish() noexcept -> void {
     stop_update_thread();
 
     std::lock_guard lock{m_display_mutex};
@@ -487,22 +487,22 @@ inline auto ProgressTracker::finish() noexcept -> void {
         clear_line();
 
         // Completion line
-        if (colors) fmt::print("{}", AnsiCodes::BRIGHT_GREEN);
+        if (colors) fmt::print("{}", ansi_codes::BRIGHT_GREEN);
         fmt::print(" {} Complete!   │   ", m_config.label);
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
 
         // Files processed
         fmt::print(" Items: ");
-        if (colors) fmt::print("{}", AnsiCodes::BRIGHT_CYAN);
+        if (colors) fmt::print("{}", ansi_codes::BRIGHT_CYAN);
         fmt::print("{}", format_number(m_total));
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
         fmt::print("  │  ");
 
         // Time elapsed
         fmt::print("⏱  Time: ");
-        if (colors) fmt::print("{}", AnsiCodes::MAGENTA);
+        if (colors) fmt::print("{}", ansi_codes::MAGENTA);
         fmt::print("{}", format_duration(elapsed));
-        if (colors) fmt::print("{}", AnsiCodes::RESET);
+        if (colors) fmt::print("{}", ansi_codes::RESET);
 
         fmt::print("\n");
         std::cout.flush();

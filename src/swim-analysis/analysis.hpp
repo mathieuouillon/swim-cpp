@@ -1,4 +1,4 @@
-// `Analysis` is the per-worker accumulator for the ~1722 ROOT histograms of the
+// `analysis` is the per-worker accumulator for the ~1722 ROOT histograms of the
 // v_z / PID diagnostic. Each worker thread folds events into its own copy
 // (fill_event) and the partials are summed bin-by-bin (merge_from), then written
 // to a single ROOT file (write). Port of analysis.rs.
@@ -21,28 +21,28 @@ namespace vz {
 /// Resolves the wanted banks to their banklist indices once, up front. A value
 /// of -1 means the bank is absent from this run's files (the C++ analog of the
 /// Rust `Option<&Bank>` being None) — `fill_event` then sees an empty bank_view.
-struct BankIndex {
+struct bank_index {
     long rec_particle = -1, mc_particle = -1, mc_recmatch = -1, mc_true = -1;
     long rec_track = -1, rec_traj = -1, rec_covmat = -1;
     long rec_scint = -1, rec_scintx = -1, rec_cher = -1, rec_calo = -1;
-    explicit BankIndex(BankList& bl);
+    explicit bank_index(bank_list& bl);
 };
 
-class Analysis {
+class analysis {
 public:
-    Analysis();
+    analysis();
 
     /// Fold one event into the accumulator.
-    void fill_event(const BankList& banks, const BankIndex& idx, const Field& field);
+    auto fill_event(const bank_list& banks, const bank_index& idx, const magnetic_field& field) -> void;
 
     /// Merge another partial accumulator into this one (bin-by-bin sum).
-    void merge_from(const Analysis& other);
+    auto merge_from(const analysis& other) -> void;
 
     /// Write every histogram into a single ROOT file (zstd-compressed).
-    void write(const std::string& path) const;
+    auto write(const std::string& path) const -> void;
 
-    std::uint64_t events() const { return events_; }
-    const std::array<std::array<std::uint64_t, N_SPECIES>, N_SPECIES>& fills() const {
+    auto events() const -> std::uint64_t { return events_; }
+    auto fills() const -> const std::array<std::array<std::uint64_t, N_SPECIES>, N_SPECIES>& {
         return fills_;
     }
 

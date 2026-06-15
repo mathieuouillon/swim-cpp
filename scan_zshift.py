@@ -486,8 +486,8 @@ def main():
     p = argparse.ArgumentParser(
         description="Scan a field-map displacement with parallel vz-swim-hist "
                     "runs and summarize the swum-vz peak alignment across theta.")
-    p.add_argument("inputs", nargs="*", default=["particles.root"],
-                   help="input particles.root file(s) (default: particles.root)")
+    p.add_argument("inputs", nargs="*", default=["output/cpp/particles.root"],
+                   help="input particles.root file(s) (default: output/cpp/particles.root)")
     p.add_argument("--scan-param", default="solenoid-z", choices=sorted(PARAMS),
                    help="which field displacement to scan (default: solenoid-z)")
     p.add_argument("--grid", action="store_true",
@@ -572,7 +572,7 @@ def parallel_run(args, todo: list, submit_fn, fmt_fn):
 
 def run_1d(args, vals: list[float]):
     param = args.scan_param
-    scan_dir = Path(args.scan_dir if args.scan_dir else f"{param}_scan")
+    scan_dir = Path(args.scan_dir) if args.scan_dir else Path("output", "python", f"{param}_scan")
     args.scan_dir = str(scan_dir)  # so run_job (reads args.scan_dir) resolves it
     scan_dir.mkdir(parents=True, exist_ok=True)
 
@@ -592,7 +592,7 @@ def run_1d(args, vals: list[float]):
 
 def run_grid(args, vals: list[float]):
     import itertools
-    scan_dir = Path(args.scan_dir if args.scan_dir else "torus_grid_scan")
+    scan_dir = Path(args.scan_dir) if args.scan_dir else Path("output", "python", "torus_grid_scan")
     args.scan_dir = str(scan_dir)  # so run_grid_job (reads args.scan_dir) resolves it
     scan_dir.mkdir(parents=True, exist_ok=True)
     combos = [tuple(c) for c in itertools.product(vals, vals, vals)]

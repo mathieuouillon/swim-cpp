@@ -16,37 +16,37 @@ namespace {
 
 // Flat-index helpers into the histogram vectors (must match the construction
 // loop order in the constructor).
-constexpr std::size_t idx_trp(std::size_t t, std::size_t r, std::size_t b) {
+constexpr auto idx_trp(std::size_t t, std::size_t r, std::size_t b) -> std::size_t {
     return (t * N_SPECIES + r) * N_MOM_BINS + b;
 }
-constexpr std::size_t idx_tr(std::size_t t, std::size_t r) { return t * N_SPECIES + r; }
-constexpr std::size_t idx_var(std::size_t t, std::size_t r, std::size_t band, std::size_t v) {
+constexpr auto idx_tr(std::size_t t, std::size_t r) -> std::size_t { return t * N_SPECIES + r; }
+constexpr auto idx_var(std::size_t t, std::size_t r, std::size_t band, std::size_t v) -> std::size_t {
     return ((t * N_PION_SPECIES + r) * N_PT_BANDS + band) * N_TRACK_VARS + v;
 }
-constexpr std::size_t idx_res(std::size_t rv, std::size_t t, std::size_t r, std::size_t b) {
+constexpr auto idx_res(std::size_t rv, std::size_t t, std::size_t r, std::size_t b) -> std::size_t {
     return ((rv * N_SPECIES + t) * N_SPECIES + r) * N_MOM_BINS + b;
 }
 
 // Bank index -> view (empty view if absent), reproducing Rust's Option<&Bank>.
-hipo::bank_view bp(const BankList& bl, long i) {
+auto bp(const bank_list& bl, long i) -> hipo::bank_view {
     return i < 0 ? hipo::bank_view{} : bl[i];
 }
 
-void mk1(std::vector<std::unique_ptr<TH1D>>& v, const std::string& name, const std::string& title,
-         int nb, double lo, double hi) {
+auto mk1(std::vector<std::unique_ptr<TH1D>>& v, const std::string& name, const std::string& title,
+         int nb, double lo, double hi) -> void {
     v.push_back(std::make_unique<TH1D>(name.c_str(), title.c_str(), nb, lo, hi));
 }
-void mk2(std::vector<std::unique_ptr<TH2D>>& v, const std::string& name, const std::string& title,
-         int nx, double xlo, double xhi, int ny, double ylo, double yhi) {
+auto mk2(std::vector<std::unique_ptr<TH2D>>& v, const std::string& name, const std::string& title,
+         int nx, double xlo, double xhi, int ny, double ylo, double yhi) -> void {
     v.push_back(std::make_unique<TH2D>(name.c_str(), title.c_str(), nx, xlo, xhi, ny, ylo, yhi));
 }
 
 }  // namespace
 
-BankIndex::BankIndex(BankList& bl) {
+bank_index::bank_index(bank_list& bl) {
     auto g = [&](const char* n) -> long {
         try {
-            return getBanklistIndex(bl, n);
+            return get_banklist_index(bl, n);
         } catch (const std::exception&) {
             return -1;
         }
@@ -64,12 +64,12 @@ BankIndex::BankIndex(BankList& bl) {
     rec_calo = g("REC::Calorimeter");
 }
 
-Analysis::Analysis() {
+analysis::analysis() {
     // reco v_z / MC-truth v_z / Delta v_z, indexed idx_trp(truth, reco, mom).
     for (std::size_t t = 0; t < N_SPECIES; ++t) {
         for (std::size_t r = 0; r < N_SPECIES; ++r) {
             for (std::size_t b = 0; b < N_MOM_BINS; ++b) {
-                PBin pb = pbin(b);
+                p_bin pb = pbin(b);
                 mk1(vz_,
                     fmt::format("vz_true{}_reco{}_p{:02}_{:02}", SPECIES_TAG[t], SPECIES_TAG[r],
                                 pb.lo10, pb.hi10),
@@ -128,7 +128,7 @@ Analysis::Analysis() {
         for (std::size_t t = 0; t < N_SPECIES; ++t) {
             for (std::size_t r = 0; r < N_SPECIES; ++r) {
                 for (std::size_t b = 0; b < N_MOM_BINS; ++b) {
-                    PBin pb = pbin(b);
+                    p_bin pb = pbin(b);
                     mk1(res_,
                         fmt::format("{}_true{}_reco{}_p{:02}_{:02}", rvv.tag, SPECIES_TAG[t],
                                     SPECIES_TAG[r], pb.lo10, pb.hi10),
@@ -216,7 +216,7 @@ Analysis::Analysis() {
             fmt::format("p^{{rec}} - p_{{DC1}}^{{true}}, reco {};#Deltap [GeV];counts", tex), 120,
             -0.3, 0.3);
         for (std::size_t b = 0; b < N_MOM_BINS; ++b) {
-            PBin pb = pbin(b);
+            p_bin pb = pbin(b);
             mk1(recvz_p_, fmt::format("recvz_reco{}_p{:02}_{:02}", tag, pb.lo10, pb.hi10),
                 fmt::format("reco v_{{z}}, reco {}  {:.1f}<p<{:.1f} GeV;v_{{z}} [cm];counts", tex,
                             pb.lo, pb.hi),
@@ -233,7 +233,7 @@ Analysis::Analysis() {
     }
 }
 
-void Analysis::fill_event(const BankList& bl, const BankIndex& bi, const Field& field) {
+auto analysis::fill_event(const bank_list& bl, const bank_index& bi, const magnetic_field& field) -> void {
     events_ += 1;
 
     hipo::bank_view rec = bp(bl, bi.rec_particle);
@@ -304,7 +304,7 @@ void Analysis::fill_event(const BankList& bl, const BankIndex& bi, const Field& 
             p > 0.0 ? std::acos(std::clamp(pz / p, -1.0, 1.0)) * RAD2DEG : 0.0;
         vz_theta_[idx_tr(truth, reco)]->Fill(vz_rec, theta);
 
-        const CovRes cr = covariance_resolutions(cov, pindex, p, px, py, pz);
+        const cov_res cr = covariance_resolutions(cov, pindex, p, px, py, pz);
         const double res_vals[3] = {cr.sigtx, cr.sigty, cr.sigtheta};
         for (std::size_t rv = 0; rv < 3; ++rv) {
             if (!std::isnan(res_vals[rv])) res_[idx_res(rv, truth, reco, mom_bin)]->Fill(res_vals[rv]);
@@ -334,8 +334,8 @@ void Analysis::fill_event(const BankList& bl, const BankIndex& bi, const Field& 
                 }
 
                 const double q = (truth_pid == 211) ? 1.0 : -1.0;
-                SwimResult sw = swim_back_to_beamline(field, pos_cm, mom_gev, q);
-                if (sw.status == SwimStatus::Converged && sw.doca_rho < SWUM_MAX_DOCA_RHO) {
+                swim_result sw = swim_back_to_beamline(field, pos_cm, mom_gev, q);
+                if (sw.status == swim_status::converged && sw.doca_rho < SWUM_MAX_DOCA_RHO) {
                     swum_vz_[reco]->Fill(sw.vz);
                     swum_minus_rec_[reco]->Fill(sw.vz - vz_rec);
                     swum_rec_vs_p_[reco]->Fill(p, sw.vz - vz_rec);
@@ -352,8 +352,8 @@ void Analysis::fill_event(const BankList& bl, const BankIndex& bi, const Field& 
         if (reco < N_PION_SPECIES) {
             if (auto rst = rec_traj_dc_state(traj, pindex, p)) {
                 const double q = (reco == 0) ? 1.0 : -1.0;  // reco pi+ / pi-
-                SwimResult sw = swim_back_to_beamline(field, rst->pos, rst->mom, q);
-                if (sw.status == SwimStatus::Converged && sw.doca_rho < SWUM_MAX_DOCA_RHO) {
+                swim_result sw = swim_back_to_beamline(field, rst->pos, rst->mom, q);
+                if (sw.status == swim_status::converged && sw.doca_rho < SWUM_MAX_DOCA_RHO) {
                     recoswum_vz_[reco]->Fill(sw.vz);
                     recoswum_minus_rec_[reco]->Fill(sw.vz - vz_rec);
                     recoswum_minus_true_[reco]->Fill(sw.vz - vz_true);
@@ -461,7 +461,7 @@ void Analysis::fill_event(const BankList& bl, const BankIndex& bi, const Field& 
     }
 }
 
-void Analysis::merge_from(const Analysis& o) {
+auto analysis::merge_from(const analysis& o) -> void {
     auto add1 = [](std::vector<std::unique_ptr<TH1D>>& a,
                    const std::vector<std::unique_ptr<TH1D>>& b) {
         for (std::size_t i = 0; i < a.size(); ++i) a[i]->Add(b[i].get(), 1.0);
@@ -502,7 +502,7 @@ void Analysis::merge_from(const Analysis& o) {
         for (std::size_t r = 0; r < N_SPECIES; ++r) fills_[t][r] += o.fills_[t][r];
 }
 
-void Analysis::write(const std::string& path) const {
+auto analysis::write(const std::string& path) const -> void {
     TFile f(path.c_str(), "RECREATE");
     f.SetCompressionAlgorithm(ROOT::RCompressionSetting::EAlgorithm::kZSTD);
     f.SetCompressionLevel(5);
