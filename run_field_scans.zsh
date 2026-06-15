@@ -13,20 +13,33 @@
 # Examples:
 #   ./run_field_scans.zsh
 #   ./run_field_scans.zsh output/cpp/particles.root --beam-y -0.18 --max-parallel 20
+#   ./run_field_scans.zsh --plot-only        # re-fit/plot from existing vz_bins.root (no swimming)
 #
 # Notes:
-#   - Everything after INPUT is forwarded to EVERY scan_field.py call, e.g.
-#     --beam-y -0.18 (run 18614 beam offset), --max-parallel N, --threads-per-job N,
-#     --force (re-run existing values), --plot-only (rebuild summaries only).
-#   - Comment out a row in `scans` to skip that parameter.
-#   - WARNING: the torus-scale row is 2001 runs (-0.995..1.005 step 0.001) — ~100x
-#     the others. Coarsen its step (e.g. 0.01) or comment it out unless you need it.
+#   - The input file is the first NON-flag argument (default
+#     output/cpp/particles.root); everything else is forwarded to EVERY
+#     scan_field.py call, e.g. --beam-y -0.18 (run 18614 beam offset),
+#     --max-parallel N, --threads-per-job N, --force (re-run existing values).
+#   - --plot-only re-runs only the fitting/plotting from each scan's existing
+#     vz_bins.root (no input needed, no swimming) — seconds, not hours. Use it
+#     to re-make every summary after changing the Python plotting/fit code.
+#   - The scan ranges below must match the runs you want to (re)plot. Comment
+#     out a row to skip that parameter.
 
 emulate -L zsh
 
-INPUT=${1:-output/cpp/particles.root}
-shift 2>/dev/null || true
-extra=("$@")                          # forwarded to every scan_field.py call
+# Input = first non-flag argument (its default is fine for --plot-only, which
+# needs no input); every other argument is forwarded verbatim to scan_field.py.
+if [[ ${1:-} == -* ]]; then
+  INPUT=output/cpp/particles.root
+else
+  INPUT=${1:-output/cpp/particles.root}
+  shift 2>/dev/null || true
+fi
+extra=("$@")
+
+plot_only=0
+(( ${extra[(I)--plot-only]} )) && plot_only=1   # --plot-only present among the forwarded args?
 
 PY=${PYTHON:-python3}
 script=${0:A:h}/scan_field.py         # scan_field.py sits next to this driver
@@ -40,16 +53,21 @@ scans=(
   "torus-x      -0.5    0.5     0.05"
   "torus-y      -0.5    0.5     0.05"
   "torus-z      -2      2       0.2"
-  "torus-scale  -0.995  1.005   0.001"
+  "torus-scale  -1.005  -0.995  0.001"   # fine scan around nominal -1.0 (11 runs); widen if needed
 )
 
-print -P "%B input: ${INPUT}   forwarding: ${extra:-<none>} %b"
+if (( plot_only )); then
+  print -P "%B plot-only: re-fitting/plotting from existing vz_bins.root (no swimming)   forwarding: ${extra} %b"
+else
+  print -P "%B input: ${INPUT}   forwarding: ${extra:-<none>} %b"
+fi
 
 typeset -a failed
 for row in $scans; do
   f=(${=row})                         # split the row on whitespace
   param=$f[1] min=$f[2] max=$f[3] step=$f[4]
-  print -P "%B%F{cyan}== ${param}: ${min} .. ${max} step ${step}  (${entries} entries) ==%f%b"
+  (( plot_only )) && mode="plot-only" || mode="${entries} entries"
+  print -P "%B%F{cyan}== ${param}: ${min} .. ${max} step ${step}  (${mode}) ==%f%b"
   if $PY $script $INPUT \
        --scan-param $param --z-min $min --z-max $max --z-step $step \
        --max-entries $entries $extra; then
