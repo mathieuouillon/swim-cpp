@@ -342,12 +342,13 @@ def fit_peak2_gauss(counts: np.ndarray, centers: np.ndarray, lo: float, hi: floa
 
     Locates the peak maximum inside the window on lightly smoothed counts, walks
     out to the contiguous run of bins above `top_frac` x maximum (the FWHM slice
-    for top_frac = 0.5), and fits a pure Gaussian to that slice with
-    scipy.optimize.curve_fit. Fitting only the top makes the result insensitive
-    to the tails and to the overlap with the first peak. Returns a Peak2Fit with
-    the mean and sigma and their 1-sigma errors (from the covariance); `ok` is
-    False when the window is empty, the slice is too short, or the fit does not
-    converge."""
+    for top_frac = 0.5) but STOPS at the first valley on each side so an
+    overlapping neighbour peak is never swallowed, and fits a pure Gaussian to
+    that slice with scipy.optimize.curve_fit. Fitting only the top makes the
+    result insensitive to the tails and to the overlap with the first peak.
+    Returns a Peak2Fit with the mean and sigma and their 1-sigma errors (from
+    the covariance); `ok` is False when the window is empty, the slice is too
+    short, or the fit does not converge."""
     mask = (centers >= lo) & (centers <= hi)
     idx = np.flatnonzero(mask)
     if idx.size == 0:
@@ -357,11 +358,16 @@ def fit_peak2_gauss(counts: np.ndarray, centers: np.ndarray, lo: float, hi: floa
     thresh = top_frac * smooth[imax]
     if thresh <= 0:
         return _FAILED_PEAK2
+    # Walk down each flank while the counts keep DESCENDING and stay above the
+    # threshold. The descent test stops at a valley, so when the two peaks
+    # overlap (the valley between them sits above `thresh`) the slice no longer
+    # runs across it into the neighbour peak -- the failure that railed the
+    # single-Gaussian fit (mu pinned to the window edge, sigma to its bound).
     klo = imax
-    while klo > 0 and smooth[klo - 1] >= thresh:
+    while klo > 0 and smooth[klo - 1] >= thresh and smooth[klo - 1] <= smooth[klo]:
         klo -= 1
     khi = imax
-    while khi < len(smooth) - 1 and smooth[khi + 1] >= thresh:
+    while khi < len(smooth) - 1 and smooth[khi + 1] >= thresh and smooth[khi + 1] <= smooth[khi]:
         khi += 1
     x, y = centers[klo:khi + 1], counts[klo:khi + 1]
     if x.size < min_pts:
@@ -370,11 +376,15 @@ def fit_peak2_gauss(counts: np.ndarray, centers: np.ndarray, lo: float, hi: floa
     # (the slice spans ~ the FWHM, so sigma ~ width / 2.355).
     amp0 = float(counts[imax])
     mean0 = float(centers[imax])
-    sigma0 = max((centers[khi] - centers[klo]) / 2.355, 0.1)
+    width = float(centers[khi] - centers[klo])
+    sigma0 = max(width / 2.355, 0.1)
+    # Bound the centre to the fitted slice and sigma to its width, so a poor
+    # slice can never rail the fit out to the window/axis edges.
     try:
         popt, pcov = curve_fit(
             _gaussian, x, y, p0=[amp0, mean0, sigma0],
-            bounds=([0.0, lo, 0.05], [np.inf, hi, 5.0]), maxfev=10000,
+            bounds=([0.0, float(centers[klo]), 0.05], [np.inf, float(centers[khi]), width]),
+            maxfev=10000,
         )
     except (RuntimeError, ValueError):
         return _FAILED_PEAK2
@@ -555,7 +565,7 @@ def write_peak2_fits(scan_dir: Path, param: str, vals: list[float]):
                         va="top", ha="left", color="tab:red")
             ax.set_xlabel(r"swum $v_z$ [cm]")
             ax.set_ylabel("counts")
-            ax.set_title(f"{label} {v:+.2f} — 2nd-peak Gaussian fit")
+            ax.set_title(f"{label} {vfmt(v)} — 2nd-peak Gaussian fit")
             ax.legend(fontsize=8, loc="upper right")
             fig.tight_layout()
             pdf.savefig(fig, bbox_inches="tight")
