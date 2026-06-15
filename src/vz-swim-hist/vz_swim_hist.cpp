@@ -33,8 +33,6 @@
 //                [--torus PATH] [--solenoid PATH]
 //                [--torus-scale X] [--solenoid-scale X] [--solenoid-z-shift X]
 //                [--torus-z-shift X] [--torus-x-shift X] [--torus-y-shift X]
-//                [--vz-cot-coeff C0] [--vz-cot-p-coeff C1]
-//                   (vz -> vz + (C0 + C1/p)*cot(theta) theta-walk correction)
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -102,13 +100,6 @@ struct cli_args {
     int pid = 11;         // species to analyze by reco pid: 11 e-, 211 pi+, -211 pi-
     double beam_x = 0.0;  // CCDB /geometry/beam/position x_offset [cm]
     double beam_y = 0.0;  // CCDB /geometry/beam/position y_offset [cm]
-    // vz theta-walk correction: the swum (and rec) vz has a bias ~ a(p)*cot(theta)
-    // (same for both targets) with a MOMENTUM-DEPENDENT coefficient
-    // a(p) = c0 + c1/p:  c0 = geometric/alignment floor, c1/p = a 1/p field term
-    // (dominant at low p). vz -> vz + (c0 + c1/p)*cot(theta) flattens all p.
-    // Run 18614: c0 ~ 0.10, c1 ~ 0.52. Both default 0 = off.
-    double vz_cot_coeff = 0.0;    // c0 [cm]
-    double vz_cot_p_coeff = 0.0;  // c1 [cm*GeV]
     // magnetic_field configuration. NOTE the scale signs are in OUR field_map convention
     // (scale multiplies the map values verbatim), which is the OPPOSITE of
     // RUN::config's for BOTH magnets: run 18614 reports torus +1 / solenoid -1,
@@ -182,10 +173,6 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--dc-x-shift").default_value(0.0).help("DC start-state x-shift [cm]");
     p.add_argument("--dc-y-shift").default_value(0.0).help("DC start-state y-shift [cm]");
     p.add_argument("--dc-z-shift").default_value(0.0).help("DC start-state z-shift [cm]");
-    p.add_argument("--vz-cot-coeff", "--vz-theta-correction")
-        .default_value(0.0)
-        .help("vz theta-walk correction c0 [cm]");
-    p.add_argument("--vz-cot-p-coeff").default_value(0.0).help("vz theta-walk correction c1 [cm*GeV]");
     p.add_argument("-q", "--quiet").flag().help("suppress the progress bar");
     p.add_argument("--emit-counts").default_value("").hidden();
     p.add_argument("--entry-begin").default_value(static_cast<long long>(-1)).hidden();
@@ -208,8 +195,6 @@ auto read_args(const argparse::parser& p) -> cli_args {
     a.pid = p.get<int>("--pid");
     a.beam_x = p.get<double>("--beam-x");
     a.beam_y = p.get<double>("--beam-y");
-    a.vz_cot_coeff = p.get<double>("--vz-cot-coeff");
-    a.vz_cot_p_coeff = p.get<double>("--vz-cot-p-coeff");
     a.torus = p.get<std::string>("--torus");
     a.solenoid = p.get<std::string>("--solenoid");
     a.torus_scale = p.get<double>("--torus-scale");
@@ -442,27 +427,18 @@ struct swim_worker {
                 continue;
             ++n_swim_ok;
 
-            // vz theta-walk correction: vz -> vz + (c0 + c1/p)*cot(theta),
-            // applied to both rec and swum (so dvz is unchanged). c0 is the
-            // geometric floor, c1/p the 1/p field term. cot(theta) = pz / p_t.
-            const double p_t = std::sqrt(double(px) * px + double(py) * py);
-            const double corr =
-                p_t > 0.0 ? (args->vz_cot_coeff + args->vz_cot_p_coeff / p) * (double(pz) / p_t)
-                         : 0.0;
-            const double vz_rec_c = vz_rec + corr;
-            const double vz_swum_c = sw.vz + corr;
-            sum_swum_vz += vz_swum_c;
+            sum_swum_vz += sw.vz;
 
-            grid.rec[pb][tb]->Fill(vz_rec_c);
-            grid.swum[pb][tb]->Fill(vz_swum_c);
-            grid.dvz[pb][tb]->Fill(vz_swum_c - vz_rec_c);
+            grid.rec[pb][tb]->Fill(vz_rec);
+            grid.swum[pb][tb]->Fill(sw.vz);
+            grid.dvz[pb][tb]->Fill(sw.vz - vz_rec);
 
             // Same fills, binned by sector (from the momentum azimuth).
             const double phi = std::atan2(double(py), double(px)) * vz::RAD2DEG;
             const std::size_t sec = sector_index(phi);
-            grid.sec_rec[sec][pb][tb]->Fill(vz_rec_c);
-            grid.sec_swum[sec][pb][tb]->Fill(vz_swum_c);
-            grid.sec_dvz[sec][pb][tb]->Fill(vz_swum_c - vz_rec_c);
+            grid.sec_rec[sec][pb][tb]->Fill(vz_rec);
+            grid.sec_swum[sec][pb][tb]->Fill(sw.vz);
+            grid.sec_dvz[sec][pb][tb]->Fill(sw.vz - vz_rec);
         }
         if (progress && since_report > 0) progress->add(static_cast<std::size_t>(since_report));
     }
@@ -563,9 +539,7 @@ auto base_worker_argv(const std::string& exe, const cli_args& a) -> std::vector<
             "--torus-y-shift", fmt::format("{}", a.torus_y_shift),
             "--dc-x-shift", fmt::format("{}", a.dc_x_shift),
             "--dc-y-shift", fmt::format("{}", a.dc_y_shift),
-            "--dc-z-shift", fmt::format("{}", a.dc_z_shift),
-            "--vz-cot-coeff", fmt::format("{}", a.vz_cot_coeff),
-            "--vz-cot-p-coeff", fmt::format("{}", a.vz_cot_p_coeff)};
+            "--dc-z-shift", fmt::format("{}", a.dc_z_shift)};
 }
 
 // Probe the input tree once: validate every file and return the entry count.
@@ -675,9 +649,8 @@ auto run_supervisor(const cli_args& args, char** argv, Long64_t n_entries, Long6
     fmt::print("vz-swim-hist: {} worker process(es) over {}{} particles -> {}\n", n_workers,
                n_entries < total_entries ? fmt::format("{} of ", n_entries) : std::string(),
                total_entries, args.output);
-    fmt::print("swim: from DC region {}, beam offset ({}, {}) cm + per-event raster"
-               ", vz correction (c0={} + c1={}/p)*cot(theta)\n",
-               args.dc_region, args.beam_x, args.beam_y, args.vz_cot_coeff, args.vz_cot_p_coeff);
+    fmt::print("swim: from DC region {}, beam offset ({}, {}) cm + per-event raster\n",
+               args.dc_region, args.beam_x, args.beam_y);
 
     if (!vz::run_workers(argvs)) {
         std::fprintf(stderr, "error: one or more workers failed; '%s' not written\n",
