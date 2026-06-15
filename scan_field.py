@@ -337,38 +337,50 @@ _FAILED_PEAK2 = Peak2Fit(np.nan, np.nan, np.nan, np.nan, np.nan, 0, 0,
 
 
 def fit_peak2_gauss(counts: np.ndarray, centers: np.ndarray, lo: float, hi: float,
-                    *, top_frac: float = 0.5, min_pts: int = 4) -> Peak2Fit:
+                    *, top_frac: float = 0.6, smooth_cm: float = 0.4,
+                    min_pts: int = 5) -> Peak2Fit:
     """Gaussian fit of the TOP `top_frac` of the second swum-vz peak in [lo, hi].
 
-    Locates the peak maximum inside the window on lightly smoothed counts, walks
-    out to the contiguous run of bins above `top_frac` x maximum (the FWHM slice
-    for top_frac = 0.5) but STOPS at the first valley on each side so an
-    overlapping neighbour peak is never swallowed, and fits a pure Gaussian to
-    that slice with scipy.optimize.curve_fit. Fitting only the top makes the
-    result insensitive to the tails and to the overlap with the first peak.
-    Returns a Peak2Fit with the mean and sigma and their 1-sigma errors (from
-    the covariance); `ok` is False when the window is empty, the slice is too
-    short, or the fit does not converge."""
-    mask = (centers >= lo) & (centers <= hi)
-    idx = np.flatnonzero(mask)
+    The swum-vz spectrum has two overlapping target peaks; the second (nearest
+    vz = 0) sits on the shoulder of the first. Locate its maximum inside the
+    window on counts smoothed over `smooth_cm` (wide enough to ignore per-bin
+    noise), take the contiguous run of bins above `top_frac` x maximum around it,
+    then clip each side at the first real valley (an interior minimum of the
+    smoothed flank) so the slice can never bleed into the neighbour peak. A pure
+    Gaussian is fit (scipy.optimize.curve_fit) to that top-of-peak slice of the
+    ORIGINAL counts. With top_frac = 0.6 the threshold stays above the inter-peak
+    valley, so the slice is the peak's own near-symmetric cap and mu tracks the
+    true centre rather than being dragged onto the contaminated lower flank.
+
+    Returns a Peak2Fit with the mean and sigma and their 1-sigma errors (from the
+    covariance); `ok` is False when the window is empty, the slice is too short,
+    or the fit does not converge."""
+    idx = np.flatnonzero((centers >= lo) & (centers <= hi))
     if idx.size == 0:
         return _FAILED_PEAK2
-    smooth = np.convolve(counts, np.ones(3) / 3.0, mode="same")
+    # Smooth over ~smooth_cm (an odd number of bins) only to choose the slice;
+    # the fit itself uses the raw counts.
+    bw = float(centers[1] - centers[0])
+    ks = max(3, int(round(smooth_cm / bw)))
+    ks += (ks + 1) % 2  # force odd so the moving average is centred
+    smooth = np.convolve(counts, np.ones(ks) / ks, mode="same")
     imax = int(idx[np.argmax(smooth[idx])])
     thresh = top_frac * smooth[imax]
     if thresh <= 0:
         return _FAILED_PEAK2
-    # Walk down each flank while the counts keep DESCENDING and stay above the
-    # threshold. The descent test stops at a valley, so when the two peaks
-    # overlap (the valley between them sits above `thresh`) the slice no longer
-    # runs across it into the neighbour peak -- the failure that railed the
-    # single-Gaussian fit (mu pinned to the window edge, sigma to its bound).
+    # Contiguous run above the top-fraction threshold around the maximum...
     klo = imax
-    while klo > 0 and smooth[klo - 1] >= thresh and smooth[klo - 1] <= smooth[klo]:
+    while klo > 0 and smooth[klo - 1] >= thresh:
         klo -= 1
     khi = imax
-    while khi < len(smooth) - 1 and smooth[khi + 1] >= thresh and smooth[khi + 1] <= smooth[khi]:
+    while khi < len(smooth) - 1 and smooth[khi + 1] >= thresh:
         khi += 1
+    # ...clipped at the first real valley on each side (the interior minimum of
+    # the smoothed flank); a no-op for an isolated peak, but it stops the slice
+    # from crossing a deep valley into the neighbour peak when the two overlap
+    # enough that the valley rises above the threshold.
+    klo += int(np.argmin(smooth[klo:imax + 1]))
+    khi = imax + int(np.argmin(smooth[imax:khi + 1]))
     x, y = centers[klo:khi + 1], counts[klo:khi + 1]
     if x.size < min_pts:
         return _FAILED_PEAK2
