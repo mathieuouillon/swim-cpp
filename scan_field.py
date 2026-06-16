@@ -113,7 +113,7 @@ def _kill_children():
 # ── Layout of the vz-swim-hist output (keep in sync with src/vz_swim_hist.cpp
 # and plot_vz_bins.py) ───────────────────────────────────────────────────────
 P_EDGES = np.arange(2, 10 + 1, 1)        # electron default: 2,3,...,10 GeV -> 8 bins
-TH_EDGES = np.arange(6, 26 + 1, 2)       # 6..26 deg (all species)          -> 10 bins
+TH_EDGES = np.arange(6, 26 + 1, 2)       # electron default: 6..26 deg, 2 deg -> 10 bins
 P_BINS = list(zip(P_EDGES[:-1], P_EDGES[1:]))
 TH_BINS = list(zip(TH_EDGES[:-1], TH_EDGES[1:]))
 
@@ -125,6 +125,16 @@ def momentum_edges(pid: int):
     if abs(pid) == 211:
         return np.array([0.3, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
     return np.arange(2, 10 + 1, 1).astype(float)
+
+
+def theta_edges(pid: int):
+    """Theta bin edges for the species (MUST match vz-swim-hist make_grid):
+    pions (|pid| == 211) are wide-angle, so they get 3-deg bins over [6, 42)
+    (12 bins); everything else keeps the electron 2-deg [6, 26) grid (10 bins).
+    main() applies it to TH_EDGES/TH_BINS."""
+    if abs(pid) == 211:
+        return np.arange(6, 42 + 1, 3).astype(float)
+    return np.arange(6, 26 + 1, 2).astype(float)
 
 # The two RG-D target peaks in the swum-vz distribution: search window per peak
 # (cm). The histogram axis is [-13, 0].
@@ -813,9 +823,11 @@ def main():
 
     # Adopt the species-dependent (p, theta) grid (pions use a softer momentum
     # grid than electrons; in sync with vz-swim-hist make_grid).
-    global P_EDGES, P_BINS
+    global P_EDGES, P_BINS, TH_EDGES, TH_BINS
     P_EDGES = momentum_edges(args.pid)
     P_BINS = list(zip(P_EDGES[:-1], P_EDGES[1:]))
+    TH_EDGES = theta_edges(args.pid)
+    TH_BINS = list(zip(TH_EDGES[:-1], TH_EDGES[1:]))
 
     if args.shifts:
         vals = sorted(set(args.shifts))

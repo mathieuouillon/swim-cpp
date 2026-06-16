@@ -1,6 +1,6 @@
 #!/usr/bin/env zsh
 #
-# Drive scan_field.py over every field-alignment parameter, 10 M entries each.
+# Drive scan_field.py over every field-alignment parameter, 100 M entries each.
 #
 # Each row in `scans` below is an independent 1-D sweep: scan_field.py runs
 # vz-swim-hist once per value (--max-parallel at a time, each loading its own
@@ -58,7 +58,7 @@ species=${species_of[$pid]:-pid$pid}
 
 PY=${PYTHON:-python3}
 script=${0:A:h}/scan_field.py         # scan_field.py sits next to this driver
-entries=10000000                      # 10 M tree entries per run
+entries=100000000                     # 100 M tree entries per run
 
 # param         min     max     step          (cm for shifts; dimensionless for scale)
 scans=(

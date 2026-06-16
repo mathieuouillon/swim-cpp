@@ -72,10 +72,22 @@ P_EDGES = np.arange(2, 10 + 1, 1)        # 2,3,...,10 GeV -> 8 bins
 TH_EDGES = np.arange(6, 26 + 1, 2)       # 6..26 deg      -> 10 bins
 P_BINS = list(zip(P_EDGES[:-1], P_EDGES[1:]))
 TH_BINS = list(zip(TH_EDGES[:-1], TH_EDGES[1:]))
-NROW, NCOL = 2, 5                        # theta panels per page
+NCOL = 5                                 # theta panels per row; rows follow the bin count
 
-# One color per theta bin (tab10, as in the reference electron-vz figure).
-TH_COLORS = [plt.cm.tab10(i % 10) for i in range(len(TH_BINS))]
+
+def _theta_rows() -> int:
+    return (len(TH_BINS) + NCOL - 1) // NCOL
+
+# One color per theta bin. tab10 for <=10 bins (the electron grid, as in the
+# reference figure); a theta-ordered turbo ramp when there are more (the 12-bin
+# pion grid) so every bin stays distinct.
+def _theta_colors(n: int):
+    if n <= 10:
+        return [plt.cm.tab10(i) for i in range(n)]
+    return [plt.cm.turbo(x) for x in np.linspace(0.05, 0.95, n)]
+
+
+TH_COLORS = _theta_colors(len(TH_BINS))
 
 
 def _ptag(e: float) -> str:
@@ -104,7 +116,7 @@ def _set_grid_from(f) -> None:
     if ps:
         P_BINS = sorted(ps)
         TH_BINS = sorted(ths)
-        TH_COLORS = [plt.cm.tab10(i % 10) for i in range(len(TH_BINS))]
+        TH_COLORS = _theta_colors(len(TH_BINS))
 
 
 def _mean_rms(vals: np.ndarray, edges: np.ndarray) -> tuple[float, float]:
@@ -173,9 +185,12 @@ def plot_rec_swum(file_path: str = "vz_bins.root", out_path: str = "vz_rec_swum.
     """One page per p-bin: 2x5 theta panels overlaying rec vz and swum vz."""
     with uproot.open(file_path) as f, PdfPages(out_path) as pdf:
         _set_grid_from(f)
+        nrow = _theta_rows()
         for p_lo, p_hi in P_BINS:
-            fig, axs = plt.subplots(NROW, NCOL, figsize=(4.0 * NCOL, 3.4 * NROW),
+            fig, axs = plt.subplots(nrow, NCOL, figsize=(4.0 * NCOL, 3.4 * nrow),
                                     squeeze=False, sharex=True)
+            for j in range(len(TH_BINS), nrow * NCOL):  # hide unused panels
+                axs[j // NCOL][j % NCOL].axis("off")
             for i, (t_lo, t_hi) in enumerate(TH_BINS):
                 ax = axs[i // NCOL][i % NCOL]
                 rv, edges = f[_key("vz_rec", p_lo, p_hi, t_lo, t_hi)].to_numpy()
@@ -193,7 +208,7 @@ def plot_rec_swum(file_path: str = "vz_bins.root", out_path: str = "vz_rec_swum.
                     ax.text(0.5, 0.5, "no entries", ha="center", va="center",
                             transform=ax.transAxes, fontsize=9, color="gray")
                 ax.set_title(rf"${t_lo} < \theta < {t_hi}^\circ$", fontsize=10)
-                if i // NCOL == NROW - 1:
+                if i // NCOL == nrow - 1:
                     ax.set_xlabel(r"$v_z$ [cm]")
                 if i % NCOL == 0:
                     ax.set_ylabel("Counts")
@@ -209,9 +224,12 @@ def plot_dvz(file_path: str = "vz_bins.root", out_path: str = "vz_dvz.pdf"):
     """One page per p-bin: 2x5 theta panels of dvz = vz(swum) - vz(rec)."""
     with uproot.open(file_path) as f, PdfPages(out_path) as pdf:
         _set_grid_from(f)
+        nrow = _theta_rows()
         for p_lo, p_hi in P_BINS:
-            fig, axs = plt.subplots(NROW, NCOL, figsize=(4.0 * NCOL, 3.4 * NROW),
+            fig, axs = plt.subplots(nrow, NCOL, figsize=(4.0 * NCOL, 3.4 * nrow),
                                     squeeze=False, sharex=True)
+            for j in range(len(TH_BINS), nrow * NCOL):  # hide unused panels
+                axs[j // NCOL][j % NCOL].axis("off")
             for i, (t_lo, t_hi) in enumerate(TH_BINS):
                 ax = axs[i // NCOL][i % NCOL]
                 vals, edges = f[_key("dvz", p_lo, p_hi, t_lo, t_hi)].to_numpy()
@@ -227,7 +245,7 @@ def plot_dvz(file_path: str = "vz_bins.root", out_path: str = "vz_dvz.pdf"):
                     ax.text(0.5, 0.5, "no entries", ha="center", va="center",
                             transform=ax.transAxes, fontsize=9, color="gray")
                 ax.set_title(rf"${t_lo} < \theta < {t_hi}^\circ$", fontsize=10)
-                if i // NCOL == NROW - 1:
+                if i // NCOL == nrow - 1:
                     ax.set_xlabel(r"$v_z^{\rm swum} - v_z^{\rm rec}$ [cm]")
                 if i % NCOL == 0:
                     ax.set_ylabel("Counts")
@@ -240,11 +258,11 @@ def plot_dvz(file_path: str = "vz_bins.root", out_path: str = "vz_dvz.pdf"):
 
 def plot_summary(file_path: str = "vz_bins.root", out_path: str = "vz_summary.pdf"):
     """<dvz> vs theta-bin center, one curve per p-bin (bars = RMS)."""
-    tmid = 0.5 * (TH_EDGES[:-1] + TH_EDGES[1:]).astype(float)
-    colors = plt.cm.viridis(np.linspace(0.0, 0.85, len(P_BINS)))
     fig, ax = plt.subplots(figsize=(8, 5.5))
     with uproot.open(file_path) as f:
-        _set_grid_from(f)
+        _set_grid_from(f)  # discover the (p, theta) grid before sizing arrays
+        tmid = np.array([0.5 * (t_lo + t_hi) for t_lo, t_hi in TH_BINS])
+        colors = plt.cm.viridis(np.linspace(0.0, 0.85, len(P_BINS)))
         for (p_lo, p_hi), color in zip(P_BINS, colors):
             means = np.full(len(TH_BINS), np.nan)
             rms = np.full(len(TH_BINS), np.nan)

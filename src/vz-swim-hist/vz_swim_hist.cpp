@@ -61,30 +61,44 @@
 
 namespace {
 
-// (p, theta) grid. Theta is always 2-deg bins over [6, 26). Momentum is
-// species-dependent (make_grid): 1-GeV bins over [2, 10) for electrons (the
-// default), a softer [0.3, 6] GeV grid for pions (most pions are sub-2-GeV).
-// N_P_MAX bounds the per-cell arrays; the active grid GRID (set from --pid in
-// main) uses n_p of them with arbitrary, possibly non-uniform, edges.
+// (p, theta) grid, both axes species-dependent (make_grid). Electrons get
+// 1-GeV momentum bins over [2, 10) and 2-deg theta bins over [6, 26). Pions get
+// a softer [0.3, 6] GeV momentum grid and a wider [6, 42) theta grid in 3-deg
+// bins: most pions are sub-2-GeV and wide-angle (the bulk peaks near 25 deg and
+// the old 26-deg ceiling threw away ~86% of the 0.3-1 GeV pions). N_P_MAX /
+// N_TH_MAX bound the per-cell arrays; the active grid GRID (set from --pid in
+// main) uses n_p / n_th of them, with arbitrary edges / bin width.
 constexpr std::size_t N_P_MAX = 8;
-constexpr std::size_t N_TH = 10;
-constexpr double TH_MIN = 6.0, TH_WIDTH = 2.0;
+constexpr std::size_t N_TH_MAX = 12;
 
 struct pt_grid {
     std::size_t n_p = 8;
     std::array<double, N_P_MAX + 1> p_edges{{2, 3, 4, 5, 6, 7, 8, 9, 10}};
+    std::size_t n_th = 10;
+    double th_min = 6.0;
+    double th_width = 2.0;
     [[nodiscard]] auto p_bin(double p) const -> long {
         for (std::size_t i = 0; i < n_p; ++i)
             if (p >= p_edges[i] && p < p_edges[i + 1]) return static_cast<long>(i);
         return -1;
     }
+    [[nodiscard]] auto th_bin(double theta_deg) const -> long {
+        const double f = (theta_deg - th_min) / th_width;
+        if (f < 0.0) return -1;
+        const auto i = static_cast<long>(f);
+        return i < static_cast<long>(n_th) ? i : -1;
+    }
+    [[nodiscard]] auto th_lo(std::size_t tb) const -> double { return th_min + tb * th_width; }
+    [[nodiscard]] auto th_hi(std::size_t tb) const -> double { return th_min + (tb + 1) * th_width; }
 };
 
-// Momentum grid for the selected species: pi+/- get [0.3, 1, 2, 3, 4, 5, 6]
-// (6 bins); everything else keeps the 8-bin electron grid [2 .. 10].
+// Per-species (p, theta) grid: pi+/- get the 6-bin [0.3 .. 6] GeV momentum grid
+// and 12 theta bins of 3 deg over [6, 42); everything else keeps the 8-bin
+// [2 .. 10] GeV electron grid and 10 theta bins of 2 deg over [6, 26).
 [[nodiscard]] auto make_grid(int pid) -> pt_grid {
-    if (pid == 211 || pid == -211) return pt_grid{6, {{0.3, 1, 2, 3, 4, 5, 6, 0, 0}}};
-    return pt_grid{8, {{2, 3, 4, 5, 6, 7, 8, 9, 10}}};
+    if (pid == 211 || pid == -211)
+        return pt_grid{6, {{0.3, 1, 2, 3, 4, 5, 6, 0, 0}}, 12, 6.0, 3.0};
+    return pt_grid{8, {{2, 3, 4, 5, 6, 7, 8, 9, 10}}, 10, 6.0, 2.0};
 }
 
 // Active (p, theta) grid for this process; set once from --pid in main().
@@ -290,8 +304,8 @@ auto p_tag(double e) -> std::string {
 }
 
 auto cell_tag(std::size_t pb, std::size_t tb) -> std::string {
-    const int tlo = static_cast<int>(std::lround(TH_MIN + tb * TH_WIDTH));
-    const int thi = static_cast<int>(std::lround(TH_MIN + (tb + 1) * TH_WIDTH));
+    const int tlo = static_cast<int>(std::lround(GRID.th_lo(tb)));
+    const int thi = static_cast<int>(std::lround(GRID.th_hi(tb)));
     return fmt::format("p{}_{}_th{:02d}_{:02d}", p_tag(GRID.p_edges[pb]),
                        p_tag(GRID.p_edges[pb + 1]), tlo, thi);
 }
@@ -305,21 +319,20 @@ auto sector_tag(std::size_t s, std::size_t pb, std::size_t tb) -> std::string {
 // selection), three histograms per cell. Each worker owns one (filled without
 // locking); the workers' grids are merged into the main one at the end.
 struct cell_grid {
-    std::array<std::array<std::unique_ptr<TH1D>, N_TH>, N_P_MAX> rec, swum, dvz;
+    std::array<std::array<std::unique_ptr<TH1D>, N_TH_MAX>, N_P_MAX> rec, swum, dvz;
     // (sector x p x theta): lets us test whether the per-sector vz modulation
     // is momentum-dependent (torus-coil field ~ 1/p) or flat (DC alignment).
     using sec_grid =
-        std::array<std::array<std::array<std::unique_ptr<TH1D>, N_TH>, N_P_MAX>, N_SEC>;
+        std::array<std::array<std::array<std::unique_ptr<TH1D>, N_TH_MAX>, N_P_MAX>, N_SEC>;
     sec_grid sec_rec, sec_swum, sec_dvz;
 
     cell_grid() {
         for (std::size_t pb = 0; pb < GRID.n_p; ++pb) {
-            for (std::size_t tb = 0; tb < N_TH; ++tb) {
+            for (std::size_t tb = 0; tb < GRID.n_th; ++tb) {
                 const std::string tag = cell_tag(pb, tb);
                 const std::string range = fmt::format(
                     "{}<p<{} GeV, {}<#theta<{}#circ", GRID.p_edges[pb],
-                    GRID.p_edges[pb + 1], TH_MIN + tb * TH_WIDTH,
-                    TH_MIN + (tb + 1) * TH_WIDTH);
+                    GRID.p_edges[pb + 1], GRID.th_lo(tb), GRID.th_hi(tb));
                 rec[pb][tb] = std::make_unique<TH1D>(
                     ("vz_rec_" + tag).c_str(), (range + ";v_{z} (rec) [cm];counts").c_str(),
                     VZ_HIST_BINS, VZ_HIST_MIN, VZ_HIST_MAX);
@@ -335,12 +348,11 @@ struct cell_grid {
         // Per-sector grid, momentum-resolved (sector x p x theta).
         for (std::size_t s = 0; s < N_SEC; ++s) {
             for (std::size_t pb = 0; pb < GRID.n_p; ++pb) {
-                for (std::size_t tb = 0; tb < N_TH; ++tb) {
+                for (std::size_t tb = 0; tb < GRID.n_th; ++tb) {
                     const std::string tag = sector_tag(s, pb, tb);
                     const std::string range = fmt::format(
                         "sector {}, {}<p<{} GeV, {}<#theta<{}#circ", s + 1,
-                        GRID.p_edges[pb], GRID.p_edges[pb + 1], TH_MIN + tb * TH_WIDTH,
-                        TH_MIN + (tb + 1) * TH_WIDTH);
+                        GRID.p_edges[pb], GRID.p_edges[pb + 1], GRID.th_lo(tb), GRID.th_hi(tb));
                     sec_rec[s][pb][tb] = std::make_unique<TH1D>(
                         ("vzsec_rec_" + tag).c_str(), (range + ";v_{z} (rec) [cm];counts").c_str(),
                         VZ_HIST_BINS, VZ_HIST_MIN, VZ_HIST_MAX);
@@ -359,7 +371,7 @@ struct cell_grid {
 
     auto merge(const cell_grid& other) -> void {
         for (std::size_t pb = 0; pb < GRID.n_p; ++pb) {
-            for (std::size_t tb = 0; tb < N_TH; ++tb) {
+            for (std::size_t tb = 0; tb < GRID.n_th; ++tb) {
                 rec[pb][tb]->Add(other.rec[pb][tb].get());
                 swum[pb][tb]->Add(other.swum[pb][tb].get());
                 dvz[pb][tb]->Add(other.dvz[pb][tb].get());
@@ -367,7 +379,7 @@ struct cell_grid {
         }
         for (std::size_t s = 0; s < N_SEC; ++s) {
             for (std::size_t pb = 0; pb < GRID.n_p; ++pb) {
-                for (std::size_t tb = 0; tb < N_TH; ++tb) {
+                for (std::size_t tb = 0; tb < GRID.n_th; ++tb) {
                     sec_rec[s][pb][tb]->Add(other.sec_rec[s][pb][tb].get());
                     sec_swum[s][pb][tb]->Add(other.sec_swum[s][pb][tb].get());
                     sec_dvz[s][pb][tb]->Add(other.sec_dvz[s][pb][tb].get());
@@ -454,10 +466,10 @@ struct swim_worker {
             if (p <= 0.0) continue;
             const double theta = std::acos(std::clamp(double(pz) / p, -1.0, 1.0)) * vz::RAD2DEG;
             const long pbin = GRID.p_bin(p);
-            const double ft = (theta - TH_MIN) / TH_WIDTH;
-            if (pbin < 0 || ft < 0.0 || ft >= N_TH) continue;
+            const long tbin = GRID.th_bin(theta);
+            if (pbin < 0 || tbin < 0) continue;
             const auto pb = static_cast<std::size_t>(pbin);
-            const auto tb = static_cast<std::size_t>(ft);
+            const auto tb = static_cast<std::size_t>(tbin);
             ++n_in_grid;
 
             if (!std::isfinite(dc_x) || !std::isfinite(dc_cx)) continue;  // no DC row
@@ -543,14 +555,14 @@ auto write_grid(const cell_grid& grid, const std::string& path) -> void {
     fout.SetCompressionAlgorithm(ROOT::RCompressionSetting::EAlgorithm::kZSTD);
     fout.SetCompressionLevel(5);
     for (std::size_t pb = 0; pb < GRID.n_p; ++pb)
-        for (std::size_t tb = 0; tb < N_TH; ++tb) {
+        for (std::size_t tb = 0; tb < GRID.n_th; ++tb) {
             grid.rec[pb][tb]->Write();
             grid.swum[pb][tb]->Write();
             grid.dvz[pb][tb]->Write();
         }
     for (std::size_t s = 0; s < N_SEC; ++s)
         for (std::size_t pb = 0; pb < GRID.n_p; ++pb)
-            for (std::size_t tb = 0; tb < N_TH; ++tb) {
+            for (std::size_t tb = 0; tb < GRID.n_th; ++tb) {
                 grid.sec_rec[s][pb][tb]->Write();
                 grid.sec_swum[s][pb][tb]->Write();
                 grid.sec_dvz[s][pb][tb]->Write();
@@ -575,8 +587,8 @@ auto print_summary(const cli_args& a, const swim_counts& c, const std::string& o
                        : "");
     }
     fmt::print("histograms written to {}: {} ((p,theta) {} + (sector,p,theta) {}) x 3\n", output,
-               (GRID.n_p * N_TH + N_SEC * GRID.n_p * N_TH) * 3, GRID.n_p * N_TH,
-               N_SEC * GRID.n_p * N_TH);
+               (GRID.n_p * GRID.n_th + N_SEC * GRID.n_p * GRID.n_th) * 3, GRID.n_p * GRID.n_th,
+               N_SEC * GRID.n_p * GRID.n_th);
 }
 
 // The swim-config flags shared by every worker re-exec (everything except the
