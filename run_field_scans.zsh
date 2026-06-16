@@ -13,13 +13,18 @@
 # Examples:
 #   ./run_field_scans.zsh
 #   ./run_field_scans.zsh output/cpp/particles.root --beam-y -0.18 --max-parallel 20
-#   ./run_field_scans.zsh --plot-only        # re-fit/plot from existing vz_bins.root (no swimming)
+#   ./run_field_scans.zsh output/cpp/particles.root --pid 211    # pi+  -> output/python/pi+/
+#   ./run_field_scans.zsh output/cpp/particles.root --pid -211   # pi-  -> output/python/pi-/
+#   ./run_field_scans.zsh --plot-only --pid -211   # re-fit/plot the pi- scans (no swimming)
 #
 # Notes:
 #   - The input file is the first NON-flag argument (default
 #     output/cpp/particles.root); everything else is forwarded to EVERY
 #     scan_field.py call, e.g. --beam-y -0.18 (run 18614 beam offset),
 #     --max-parallel N, --threads-per-job N, --force (re-run existing values).
+#   - --pid selects the species (11 = e-, 211 = pi+, -211 = pi-) from the same
+#     particles.root; scan_field.py routes output to output/python/<species>/,
+#     so e-/pi+/pi- are separate analyses. Default (no --pid) is the electron.
 #   - --plot-only re-runs only the fitting/plotting from each scan's existing
 #     vz_bins.root (no input needed, no swimming) — seconds, not hours. Use it
 #     to re-make every summary after changing the Python plotting/fit code.
@@ -41,6 +46,13 @@ extra=("$@")
 plot_only=0
 (( ${extra[(I)--plot-only]} )) && plot_only=1   # --plot-only present among the forwarded args?
 
+# species (banner only): the value after --pid in the forwarded args, if any.
+pid=11
+pidx=${extra[(I)--pid]}
+(( pidx )) && pid=${extra[pidx+1]}
+typeset -A species_of=(11 electron 211 pi+ -211 pi- 13 mu- -13 mu+ 321 K+ -321 K- 2212 proton)
+species=${species_of[$pid]:-pid$pid}
+
 PY=${PYTHON:-python3}
 script=${0:A:h}/scan_field.py         # scan_field.py sits next to this driver
 entries=10000000                      # 10 M tree entries per run
@@ -56,11 +68,9 @@ scans=(
   "torus-scale  -1.005  -0.995  0.001"   # fine scan around nominal -1.0 (11 runs); widen if needed
 )
 
-if (( plot_only )); then
-  print -P "%B plot-only: re-fitting/plotting from existing vz_bins.root (no swimming)   forwarding: ${extra} %b"
-else
-  print -P "%B input: ${INPUT}   forwarding: ${extra:-<none>} %b"
-fi
+mode_msg="input: ${INPUT}"
+(( plot_only )) && mode_msg="plot-only: re-fit/plot from existing vz_bins.root (no swimming)"
+print -P "%B species: ${species} (pid ${pid})   ${mode_msg}   forwarding: ${extra:-<none>} %b"
 
 typeset -a failed
 for row in $scans; do

@@ -166,12 +166,23 @@ def job_dir(scan_dir: Path, param: str, val: float) -> Path:
     return scan_dir / f"{prefix}_{vfmt(val)}"
 
 
+# Reconstructed-pid -> short species name, used to route each analysis into its
+# own output/python/<species>/ tree and to label its plots.
+SPECIES_NAMES = {11: "electron", -11: "positron", 211: "pi+", -211: "pi-",
+                 321: "K+", -321: "K-", 2212: "proton", 13: "mu-", -13: "mu+"}
+
+
+def species_name(pid: int) -> str:
+    return SPECIES_NAMES.get(pid, f"pid{pid}")
+
+
 def _base_cmd(args, out: Path) -> list[str]:
     """vz-swim-hist command shared by all jobs (no swept flags yet)."""
     cmd = [
         args.binary, *args.inputs,
         "--output", str(out),
         "--threads", str(args.threads_per_job),
+        "--pid", str(args.pid),
         "--beam-x", f"{args.beam_x}",
         "--beam-y", f"{args.beam_y}",
         "--dc-region", str(args.dc_region),
@@ -535,6 +546,7 @@ def write_peak2_fits(scan_dir: Path, param: str, vals: list[float]):
     plot_vz_bins.py); the summary pages plot peak2 mean and sigma versus the
     scanned parameter, one panel per momentum bin and one colour per theta."""
     label = PARAMS[param][1]
+    species = scan_dir.parent.name  # output/python/<species>/<param>_scan
     _, lo2, hi2 = PEAK_WINDOWS[1]  # ("peak2", -5.5, -0.5)
     th_colors = [plt.cm.tab10(i % 10) for i in range(len(TH_BINS))]
     th_labels = [rf"${t_lo}^\circ \leq \theta < {t_hi}^\circ$" for t_lo, t_hi in TH_BINS]
@@ -585,7 +597,7 @@ def write_peak2_fits(scan_dir: Path, param: str, vals: list[float]):
                     if it == 0:
                         ax.set_ylabel(rf"${p_lo}$-${p_hi}$", fontsize=6)
             fits[v] = vfits
-            fig.suptitle(rf"{label} {vfmt(v)} — peak2 fit per $(p,\theta)$"
+            fig.suptitle(rf"{species} — {label} {vfmt(v)} — peak2 fit per $(p,\theta)$"
                          r"  (rows: $p$ [GeV/$c$], cols: $\theta$)", fontsize=10)
             fig.supxlabel(r"swum $v_z$ [cm]", fontsize=9)
             fig.tight_layout()
@@ -626,7 +638,7 @@ def write_peak2_fits(scan_dir: Path, param: str, vals: list[float]):
                 h, l = axs[0][0].get_legend_handles_labels()
                 fig.legend(h, l, loc="lower center", ncol=5, fontsize=7, frameon=False,
                            title=r"$\theta$ bin", bbox_to_anchor=(0.5, -0.01))
-                fig.suptitle(rf"2nd-peak {ttl} vs {label}, per $(p,\theta)$", fontsize=12)
+                fig.suptitle(rf"{species} — 2nd-peak {ttl} vs {label}, per $(p,\theta)$", fontsize=12)
                 fig.tight_layout(rect=(0, 0.08, 1, 0.96))
                 pdf.savefig(fig, bbox_inches="tight")
                 plt.close(fig)
@@ -750,6 +762,9 @@ def main():
     p.add_argument("--beam-x", type=float, default=0.0)
     p.add_argument("--beam-y", type=float, default=0.0)
     p.add_argument("--dc-region", type=int, default=3, choices=(1, 3))
+    p.add_argument("--pid", type=int, default=11,
+                   help="species to analyze by reconstructed pid (11 = e-, 211 = pi+, "
+                        "-211 = pi-); routes output to output/python/<species>/")
     p.add_argument("--torus", default="Full_torus_r501_phi361_z501_31Mar2021.dat")
     p.add_argument("--solenoid", default="Symm_solenoid_r601_phi1_z1201_21May2019.dat")
     # Scales in OUR FieldMap sign convention = -(RUN::config) for both magnets
@@ -808,7 +823,8 @@ def parallel_run(args, todo: list, submit_fn, fmt_fn):
 
 def run_1d(args, vals: list[float]):
     param = args.scan_param
-    scan_dir = Path(args.scan_dir) if args.scan_dir else Path("output", "python", f"{param}_scan")
+    scan_dir = (Path(args.scan_dir) if args.scan_dir
+                else Path("output", "python", species_name(args.pid), f"{param}_scan"))
     args.scan_dir = str(scan_dir)  # so run_job (reads args.scan_dir) resolves it
     scan_dir.mkdir(parents=True, exist_ok=True)
 
@@ -829,7 +845,8 @@ def run_1d(args, vals: list[float]):
 
 def run_grid(args, vals: list[float]):
     import itertools
-    scan_dir = Path(args.scan_dir) if args.scan_dir else Path("output", "python", "torus_grid_scan")
+    scan_dir = (Path(args.scan_dir) if args.scan_dir
+                else Path("output", "python", species_name(args.pid), "torus_grid_scan"))
     args.scan_dir = str(scan_dir)  # so run_grid_job (reads args.scan_dir) resolves it
     scan_dir.mkdir(parents=True, exist_ok=True)
     combos = [tuple(c) for c in itertools.product(vals, vals, vals)]
