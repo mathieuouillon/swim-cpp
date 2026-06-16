@@ -173,6 +173,7 @@ struct cli_args {
     // cut threw away ~24% of low-p pions (large transverse miss from the dc3
     // direction precision, but accurate z). 50 cm keeps essentially all of them.
     double max_doca = 50.0;
+    bool no_swim = false;  // histogram the reconstructed vz directly (no swim, no field)
 };
 
 // Build the command-line parser (external/argparse). The hidden flags
@@ -223,6 +224,9 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--dc-z-shift").default_value(0.0).help("DC start-state z-shift [cm]");
     p.add_argument("--max-doca").default_value(50.0).help(
         "max swim DOCA to the beamline to accept a vertex [cm]; 5 = old tight cut");
+    p.add_argument("--no-swim").flag().help(
+        "skip the swim: histogram the reconstructed vz directly in every cell "
+        "(the statistics ceiling); no field map is loaded");
     p.add_argument("-q", "--quiet").flag().help("suppress the progress bar");
     p.add_argument("--emit-counts").default_value("").hidden();
     p.add_argument("--entry-begin").default_value(static_cast<long long>(-1)).hidden();
@@ -261,6 +265,7 @@ auto read_args(const argparse::parser& p) -> cli_args {
     a.dc_y_shift = p.get<double>("--dc-y-shift");
     a.dc_z_shift = p.get<double>("--dc-z-shift");
     a.max_doca = p.get<double>("--max-doca");
+    a.no_swim = p.get<bool>("--no-swim");
     return a;
 }
 
@@ -472,6 +477,24 @@ struct swim_worker {
             const auto tb = static_cast<std::size_t>(tbin);
             ++n_in_grid;
 
+            // Reference mode: histogram the reconstructed vz directly in every
+            // cell -- no swim, no DC requirement -- to show the full per-cell
+            // statistics ceiling. swum := rec (dvz := 0) so the usual plots work.
+            if (args->no_swim) {
+                const std::size_t sec0 =
+                    sector_index(std::atan2(double(py), double(px)) * vz::RAD2DEG);
+                grid.rec[pb][tb]->Fill(vz_rec);
+                grid.swum[pb][tb]->Fill(vz_rec);
+                grid.dvz[pb][tb]->Fill(0.0);
+                grid.sec_rec[sec0][pb][tb]->Fill(vz_rec);
+                grid.sec_swum[sec0][pb][tb]->Fill(vz_rec);
+                grid.sec_dvz[sec0][pb][tb]->Fill(0.0);
+                ++n_with_dc;
+                ++n_swim_ok;
+                sum_swum_vz += vz_rec;
+                continue;
+            }
+
             if (!std::isfinite(dc_x) || !std::isfinite(dc_cx)) continue;  // no DC row
             ++n_with_dc;
 
@@ -577,11 +600,15 @@ auto print_summary(const cli_args& a, const swim_counts& c, const std::string& o
     fmt::print("particles          : {}\n", c.n_entries);
     fmt::print("FD tracks (pid {:>4}): {}\n", a.pid, c.n_fd);
     fmt::print("  in (p,theta) grid: {}\n", c.n_in_grid);
-    fmt::print("  with DC-R{} state : {}\n", a.dc_region, c.n_with_dc);
-    fmt::print("  swim converged   : {}  (filled)\n", c.n_swim_ok);
+    if (a.no_swim) {
+        fmt::print("  filled (no swim) : {}  (reconstructed vz)\n", c.n_swim_ok);
+    } else {
+        fmt::print("  with DC-R{} state : {}\n", a.dc_region, c.n_with_dc);
+        fmt::print("  swim converged   : {}  (filled)\n", c.n_swim_ok);
+    }
     if (c.n_swim_ok > 0) {
         const double mean_vz = c.sum_swum_vz / static_cast<double>(c.n_swim_ok);
-        fmt::print("  mean swum vz     : {:.2f} cm{}\n", mean_vz,
+        fmt::print("  mean {} vz     : {:.2f} cm{}\n", a.no_swim ? "rec " : "swum", mean_vz,
                    (mean_vz < VZ_HIST_MIN || mean_vz > VZ_HIST_MAX)
                        ? "  ** OUTSIDE the histogram range -- check field scales/shifts **"
                        : "");
@@ -594,7 +621,7 @@ auto print_summary(const cli_args& a, const swim_counts& c, const std::string& o
 // The swim-config flags shared by every worker re-exec (everything except the
 // per-worker output/counts/entry-range and the input files).
 auto base_worker_argv(const std::string& exe, const cli_args& a) -> std::vector<std::string> {
-    return {exe,
+    std::vector<std::string> av = {exe,
             "--jobs", "1", "--quiet",
             "--pid", fmt::format("{}", a.pid),
             "--dc-region", fmt::format("{}", a.dc_region),
@@ -613,6 +640,8 @@ auto base_worker_argv(const std::string& exe, const cli_args& a) -> std::vector<
             "--dc-y-shift", fmt::format("{}", a.dc_y_shift),
             "--dc-z-shift", fmt::format("{}", a.dc_z_shift),
             "--max-doca", fmt::format("{}", a.max_doca)};
+    if (a.no_swim) av.push_back("--no-swim");
+    return av;
 }
 
 // Probe the input tree once: validate every file and return the entry count.
@@ -631,21 +660,27 @@ auto probe_entries(const cli_args& args) -> Long64_t {
 // Run one entry range [begin, end) serially into a single grid (no threads).
 // Suppresses the progress bar in worker mode (the supervisor reports instead).
 auto run_worker(const cli_args& args, Long64_t begin, Long64_t end, bool worker_mode) -> int {
-    if (!worker_mode)
-        fmt::print("loading field maps: torus={} (scale {}, shift x={} y={} z={} cm), "
-                   "solenoid={} (scale {}, shift x={} y={} z={} cm)\n",
-                   args.torus, args.torus_scale, args.torus_x_shift, args.torus_y_shift,
-                   args.torus_z_shift, args.solenoid, args.solenoid_scale, args.solenoid_x_shift,
-                   args.solenoid_y_shift, args.solenoid_z_shift);
+    // --no-swim histograms the reconstructed vz directly, so the field map is
+    // never touched -- skip the ~1 GB-per-worker load entirely.
     std::unique_ptr<vz::composite_field> field_ptr;
-    try {
-        field_ptr = std::make_unique<vz::composite_field>(vz::composite_field::load(
-            args.torus, args.torus_scale, args.solenoid, args.solenoid_scale,
-            args.solenoid_z_shift, args.torus_z_shift, args.torus_x_shift, args.torus_y_shift,
-            args.solenoid_x_shift, args.solenoid_y_shift));
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "error: could not load field maps: %s\n", e.what());
-        return 1;
+    if (!args.no_swim) {
+        if (!worker_mode)
+            fmt::print("loading field maps: torus={} (scale {}, shift x={} y={} z={} cm), "
+                       "solenoid={} (scale {}, shift x={} y={} z={} cm)\n",
+                       args.torus, args.torus_scale, args.torus_x_shift, args.torus_y_shift,
+                       args.torus_z_shift, args.solenoid, args.solenoid_scale, args.solenoid_x_shift,
+                       args.solenoid_y_shift, args.solenoid_z_shift);
+        try {
+            field_ptr = std::make_unique<vz::composite_field>(vz::composite_field::load(
+                args.torus, args.torus_scale, args.solenoid, args.solenoid_scale,
+                args.solenoid_z_shift, args.torus_z_shift, args.torus_x_shift, args.torus_y_shift,
+                args.solenoid_x_shift, args.solenoid_y_shift));
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: could not load field maps: %s\n", e.what());
+            return 1;
+        }
+    } else if (!worker_mode) {
+        fmt::print("--no-swim: histogramming reconstructed vz (no swim, no field map)\n");
     }
 
     std::unique_ptr<progress_tracker> progress;
