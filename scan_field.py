@@ -27,12 +27,13 @@ solenoid z-shift has essentially no lever arm on this; a torus transverse
 NOTE: each instance loads its own field maps (~1 GB torus), so 10 parallel
 jobs need ~10+ GB of RAM.
 
-Usage (on the farm, from the repo root, after hipo2root):
-  # geometric (p-flat) part of the vz theta-walk -> DC alignment:
-  python scan_field.py particles.root --beam-y -0.18 \
+Usage (on the farm, from the repo root, after hipo2root --ccdb ...):
+  # Beam offset + field scales come from the tree's CCDB metadata; pass a flag
+  # only to override one. geometric (p-flat) part of the vz theta-walk -> DC:
+  python scan_field.py particles.root \
       --scan-param dc-z --z-min -2 --z-max 2 --z-step 0.2
   # 1/p (magnetic) part -> field SCALE (sweep absolute value near nominal):
-  python scan_field.py particles.root --beam-y -0.18 \
+  python scan_field.py particles.root \
       --scan-param torus-scale --shifts -1.06 -1.04 -1.02 -1.00 -0.98 -0.96
   python scan_field.py --scan-param dc-z --plot-only          # redo summary only
 """
@@ -183,14 +184,18 @@ def _base_cmd(args, out: Path) -> list[str]:
         "--output", str(out),
         "--threads", str(args.threads_per_job),
         "--pid", str(args.pid),
-        "--beam-x", f"{args.beam_x}",
-        "--beam-y", f"{args.beam_y}",
         "--dc-region", str(args.dc_region),
         "--torus", args.torus,
         "--solenoid", args.solenoid,
-        "--torus-scale", f"{args.torus_scale}",
-        "--solenoid-scale", f"{args.solenoid_scale}",
     ]
+    # Forward only the CCDB-derived field config that was overridden on the CLI;
+    # anything left unset is taken by vz-swim-hist from the tree's CCDB metadata
+    # (beam position + field scales, saved by hipo2root --ccdb).
+    for flag, value in (("--beam-x", args.beam_x), ("--beam-y", args.beam_y),
+                        ("--torus-scale", args.torus_scale),
+                        ("--solenoid-scale", args.solenoid_scale)):
+        if value is not None:
+            cmd += [flag, f"{value}"]
     if args.max_entries is not None:
         cmd += ["--max-entries", str(args.max_entries)]
     return cmd
@@ -273,9 +278,10 @@ def run_job(args, val: float, slots: SlotPool) -> tuple[float, int]:
     d.mkdir(parents=True, exist_ok=True)
     cmd = _base_cmd(args, d / "vz_bins.root")
     cmd += [PARAMS[args.scan_param][0], f"{val}"]  # the swept parameter
-    # When sweeping a torus shift, hold the solenoid z-shift at its established
-    # value (the C++ default is already -3, but pass it explicitly for the log).
-    if args.scan_param != "solenoid-z":
+    # When sweeping anything but solenoid-z, hold the solenoid z-shift fixed;
+    # forward it only if overridden on the CLI, else vz-swim-hist uses the CCDB
+    # value from the tree.
+    if args.scan_param != "solenoid-z" and args.solenoid_z_shift is not None:
         cmd += ["--solenoid-z-shift", f"{args.solenoid_z_shift}"]
     rc = _stream_job(cmd, d / "log.txt", f"{args.scan_param} {val:+.2f}", slots)
     return val, rc
@@ -293,8 +299,9 @@ def run_grid_job(args, xyz: tuple[float, float, float], slots: SlotPool):
     d = grid_dir(Path(args.scan_dir), xyz)
     d.mkdir(parents=True, exist_ok=True)
     cmd = _base_cmd(args, d / "vz_bins.root")
-    cmd += ["--torus-x-shift", f"{x}", "--torus-y-shift", f"{y}",
-            "--torus-z-shift", f"{z}", "--solenoid-z-shift", f"{args.solenoid_z_shift}"]
+    cmd += ["--torus-x-shift", f"{x}", "--torus-y-shift", f"{y}", "--torus-z-shift", f"{z}"]
+    if args.solenoid_z_shift is not None:
+        cmd += ["--solenoid-z-shift", f"{args.solenoid_z_shift}"]
     rc = _stream_job(cmd, d / "log.txt", f"x{x:+.1f} y{y:+.1f} z{z:+.1f}", slots)
     return xyz, rc
 
@@ -758,23 +765,30 @@ def main():
     p.add_argument("--max-entries", type=int, default=None,
                    help="process only the first N tree entries (particles) per run "
                         "(e.g. 10000000); default: all. Speeds up scans hugely.")
-    # Passed through to vz-swim-hist (defaults match the C++).
-    p.add_argument("--beam-x", type=float, default=0.0)
-    p.add_argument("--beam-y", type=float, default=0.0)
+    # CCDB-derived field config: leaving these unset (None) makes vz-swim-hist
+    # take them from the tree's CCDB metadata (saved by hipo2root --ccdb); pass
+    # one only to override the CCDB value for the scan.
+    p.add_argument("--beam-x", type=float, default=None,
+                   help="beam x offset [cm] (default: from the tree's CCDB metadata)")
+    p.add_argument("--beam-y", type=float, default=None,
+                   help="beam y offset [cm] (default: from the tree's CCDB metadata)")
     p.add_argument("--dc-region", type=int, default=3, choices=(1, 3))
     p.add_argument("--pid", type=int, default=11,
                    help="species to analyze by reconstructed pid (11 = e-, 211 = pi+, "
                         "-211 = pi-); routes output to output/python/<species>/")
     p.add_argument("--torus", default="Full_torus_r501_phi361_z501_31Mar2021.dat")
     p.add_argument("--solenoid", default="Symm_solenoid_r601_phi1_z1201_21May2019.dat")
-    # Scales in OUR FieldMap sign convention = -(RUN::config) for both magnets
-    # (see docs/coatjava_vz.md); torus -1 / solenoid +1 reproduces the pass1
-    # rec vz for RG-D 18614 (RUN::config torus +1 / solenoid -1).
-    p.add_argument("--torus-scale", type=float, default=-1.0)
-    p.add_argument("--solenoid-scale", type=float, default=1.0)
+    # Field scales in OUR FieldMap sign convention = -(RUN::config); for RG-D
+    # 18614 the CCDB metadata gives torus -1 / solenoid +1 (see docs/coatjava_vz.md).
+    # Default None -> taken from the tree's CCDB metadata.
+    p.add_argument("--torus-scale", type=float, default=None,
+                   help="torus field scale (default: from the tree's CCDB metadata)")
+    p.add_argument("--solenoid-scale", type=float, default=None,
+                   help="solenoid field scale (default: from the tree's CCDB metadata)")
     # Held fixed when scanning a torus shift (ignored when scanning solenoid-z).
-    p.add_argument("--solenoid-z-shift", type=float, default=-3.0,
-                   help="solenoid z-shift held fixed while scanning a torus shift")
+    p.add_argument("--solenoid-z-shift", type=float, default=None,
+                   help="solenoid z-shift [cm] held fixed while scanning a torus shift "
+                        "(default: from the tree's CCDB metadata)")
     p.add_argument("--force", action="store_true",
                    help="re-run values whose vz_bins.root already exists")
     p.add_argument("--plot-only", action="store_true",

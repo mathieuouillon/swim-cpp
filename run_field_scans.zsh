@@ -12,7 +12,7 @@
 #
 # Examples:
 #   ./run_field_scans.zsh
-#   ./run_field_scans.zsh output/cpp/particles.root --beam-y -0.18 --max-parallel 20
+#   ./run_field_scans.zsh output/cpp/particles.root --max-parallel 20
 #   ./run_field_scans.zsh output/cpp/particles.root --pid 211    # pi+  -> output/python/pi+/
 #   ./run_field_scans.zsh output/cpp/particles.root --pid -211   # pi-  -> output/python/pi-/
 #   ./run_field_scans.zsh --plot-only --pid -211   # re-fit/plot the pi- scans (no swimming)
@@ -20,8 +20,11 @@
 # Notes:
 #   - The input file is the first NON-flag argument (default
 #     output/cpp/particles.root); everything else is forwarded to EVERY
-#     scan_field.py call, e.g. --beam-y -0.18 (run 18614 beam offset),
-#     --max-parallel N, --threads-per-job N, --force (re-run existing values).
+#     scan_field.py call, e.g. --max-parallel N, --threads-per-job N,
+#     --force (re-run existing values).
+#   - Beam offset + field scales (torus/solenoid) come from the tree's CCDB
+#     metadata (hipo2root --ccdb); pass --beam-y / --torus-scale / ... to
+#     override one. NOTE: re-export particles.root with --ccdb if it lacks them.
 #   - --pid selects the species (11 = e-, 211 = pi+, -211 = pi-) from the same
 #     particles.root; scan_field.py routes output to output/python/<species>/,
 #     so e-/pi+/pi- are separate analyses. Default (no --pid) is the electron.
