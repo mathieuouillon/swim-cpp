@@ -49,6 +49,7 @@ struct cli_args {
     std::string output = "output/cpp/particles.root";
     int jobs = 0;             // 0 = one worker process per hardware thread
     bool run_config = false;  // only print RUN::config (per input file) and exit
+    bool all_species = false;  // keep every row; default keeps only forward e-/pi+/pi-
     bool quiet = false;
     bool worker = false;      // hidden: set by the supervisor on each re-exec
     std::string ccdb;         // CCDB sqlite snapshot; empty = skip the CCDB lookup
@@ -76,6 +77,9 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--run-config")
         .flag()
         .help("only print each input's RUN::config (run, torus/solenoid scales) and exit");
+    p.add_argument("--all-species")
+        .flag()
+        .help("keep every REC::Particle row (default: only forward-detector e-/pi+/pi-)");
     p.add_argument("--ccdb")
         .default_value("")
         .help("CCDB SQLite snapshot; look up beam position + solenoid shift by run and save "
@@ -166,6 +170,12 @@ struct particle_dumper {
     long mc_particle = -1;   // banklist index of MC::Particle (-1 = absent)
     long mc_recmatch = -1;   // banklist index of MC::RecMatch (-1 = absent)
     TTree* tree = nullptr;
+    bool keep_all = false;   // default: stage only forward-detector e-/pi+/pi-
+
+    // Species the vz analysis swims: electrons and charged pions.
+    static auto keep_species(int pid) -> bool {
+        return pid == 11 || pid == 211 || pid == -211;
+    }
 
     // Branch buffers (one row per particle).
     Long64_t event = 0;
@@ -238,13 +248,20 @@ struct particle_dumper {
         rows.clear();
         rows.reserve(static_cast<std::size_t>(n));
         for (int i = 0; i < n; ++i) {
+            const int pid_i = rec.get<int>("pid", i);
+            const int status_i = rec.get<int>("status", i);
+            // Keep only the forward-detector electrons and pions the vz analysis
+            // swims; skip everything else (other species, central detector)
+            // before the costly REC::Traj / MC-truth lookups. --all-species
+            // disables this and dumps every row, as before.
+            if (!keep_all && (!keep_species(pid_i) || !vz::is_forward(status_i))) continue;
             row r;
-            r.pid = rec.get<int>("pid", i);
+            r.pid = pid_i;
             r.px = static_cast<Float_t>(rec.get<double>("px", i));
             r.py = static_cast<Float_t>(rec.get<double>("py", i));
             r.pz = static_cast<Float_t>(rec.get<double>("pz", i));
             r.vz = static_cast<Float_t>(rec.get<double>("vz", i));
-            r.status = rec.get<int>("status", i);
+            r.status = status_i;
             r.dc_x = r.dc_y = r.dc_z = r.dc_cx = r.dc_cy = r.dc_cz = fnan;
             r.dc3_x = r.dc3_y = r.dc3_z = r.dc3_cx = r.dc3_cy = r.dc3_cz = fnan;
             if (auto k = vz::match_row(traj, i, vz::DET_DC, vz::DC_LAYERS[0])) {
@@ -414,6 +431,7 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
     dumper.run_config = bank_index("RUN::config");
     dumper.mc_particle = bank_index("MC::Particle");
     dumper.mc_recmatch = bank_index("MC::RecMatch");
+    dumper.keep_all = args.all_species;
     dumper.tree = &tree;
     tree.Branch("event", &dumper.event, "event/L");
     tree.Branch("pid", &dumper.pid, "pid/I");
@@ -468,7 +486,9 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
     if (!worker_mode) compute_run_meta(paths[0], args.ccdb, args.ccdb_variation).write(fout);
     fout.Close();
 
-    if (!worker_mode) fmt::print("wrote {} particles to {}\n", dumper.n_particles, args.output);
+    if (!worker_mode)
+        fmt::print("wrote {} {} to {}\n", dumper.n_particles,
+                   args.all_species ? "particles" : "forward e-/pi+/pi- rows", args.output);
     return 0;
 }
 
@@ -525,6 +545,7 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
         parts.push_back(part);
         std::vector<std::string> av = {exe,      "--jobs",          "1",      "--worker", "--quiet",
                                        "--output", part, "--progress-file", progress_path};
+        if (args.all_species) av.push_back("--all-species");
         if (by_file) {
             for (std::size_t j = i; j < paths.size(); j += static_cast<std::size_t>(n_workers))
                 av.push_back(paths[j]);
@@ -543,6 +564,7 @@ auto run_supervisor(const cli_args& args, char** argv, const std::vector<std::st
                by_file ? fmt::format("{} file(s)", paths.size())
                        : fmt::format("{} records in {} file(s)", total_records, paths.size()),
                args.output);
+    if (!args.all_species) fmt::print("  keeping forward-detector e-/pi+/pi- rows only\n");
     print_run_config(paths[0]);
 
     // Spawn the workers, then render one aggregate progress bar fed by the shared
@@ -630,6 +652,7 @@ auto main(int argc, char** argv) -> int {
     args.output = p.get<std::string>("--output");
     args.jobs = p.get<int>("--jobs");
     args.run_config = p.get<bool>("--run-config");
+    args.all_species = p.get<bool>("--all-species");
     args.quiet = p.get<bool>("--quiet");
     args.worker = p.get<bool>("--worker");
     args.ccdb = p.get<std::string>("--ccdb");
