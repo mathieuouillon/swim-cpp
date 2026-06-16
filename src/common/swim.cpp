@@ -11,7 +11,16 @@ namespace vz {
 namespace odeint = boost::numeric::odeint;
 
 namespace {
-constexpr double MAX_PATH_CM = 800.0;
+// A stiff (high-p) track meets the beamline at its FIRST closest approach -- the
+// long-validated electron behavior, capped at STIFF_MAX_PATH. A curly low-p pion
+// spirals, with closest-approach minima far out (> 1 m) before the vertex, so
+// below STIFF_P_GEV we keep swimming (out to CURLY_MAX_PATH) and take the
+// approach NEAREST the beamline, stopping once within VERTEX_RHO of it. Electrons
+// are only swum at p >= 2 GeV (their grid floor), so their results are unchanged.
+constexpr double STIFF_P_GEV = 2.0;
+constexpr double STIFF_MAX_PATH_CM = 800.0;
+constexpr double CURLY_MAX_PATH_CM = 3000.0;
+constexpr double VERTEX_RHO_CM = 3.0;
 constexpr double RTOL = 1e-6;
 constexpr double ATOL = 1e-6;
 using state_type = std::array<double, 6>;
@@ -59,23 +68,26 @@ auto swim_back_to_beamline(const magnetic_field& field, const std::array<double,
         odeint::make_dense_output(ATOL, RTOL, odeint::runge_kutta_dopri5<state_type>());
     stepper.initialize(y, 0.0, 0.1);
 
+    const bool stiff = (p >= STIFF_P_GEV);
+    const double max_path = stiff ? STIFF_MAX_PATH_CM : CURLY_MAX_PATH_CM;
+
     double g_prev = radial_vel(y, x_b, y_b);
     state_type y_end{};
+    double best_rho = std::numeric_limits<double>::infinity();  // nearest approach (curly search)
+    double best_z = 0.0, best_s = 0.0;
 
     try {
-        while (stepper.current_time() < MAX_PATH_CM) {
+        while (stepper.current_time() < max_path) {
             const double t0 = stepper.current_time();
             stepper.do_step(system);  // one accepted adaptive step
             const double t1 = stepper.current_time();
 
-            // Clamp evaluation to the 800 cm cap (the dense interpolant is valid
-            // across the just-accepted [t0, t1]).
-            const bool capped = (t1 >= MAX_PATH_CM);
-            const double t_end = capped ? MAX_PATH_CM : t1;
+            const bool capped = (t1 >= max_path);
+            const double t_end = capped ? max_path : t1;
             stepper.calc_state(t_end, y_end);
             const double g_cur = radial_vel(y_end, x_b, y_b);
 
-            if ((g_prev < 0.0) != (g_cur < 0.0)) {  // radial-velocity sign change
+            if ((g_prev < 0.0) != (g_cur < 0.0)) {  // a rho extremum (closest/farthest approach)
                 auto G = [&stepper, x_b, y_b](double t) {
                     state_type s;
                     stepper.calc_state(t, s);
@@ -87,10 +99,22 @@ auto swim_back_to_beamline(const magnetic_field& field, const std::array<double,
                 const double s_star = 0.5 * (br.first + br.second);
                 state_type ys;
                 stepper.calc_state(s_star, ys);
-                return {ys[2], beam_rho(ys, x_b, y_b), s_star, swim_status::converged};
+                const double rho = beam_rho(ys, x_b, y_b);
+                // Stiff track: the first closest approach IS the vertex -- return it
+                // exactly as before (electrons unchanged). Curly track: keep the
+                // nearest approach and keep swimming until genuinely at the beamline.
+                if (stiff) return {ys[2], rho, s_star, swim_status::converged};
+                if (rho < best_rho) {
+                    best_rho = rho;
+                    best_z = ys[2];
+                    best_s = s_star;
+                }
+                if (rho < VERTEX_RHO_CM) return {best_z, best_rho, best_s, swim_status::converged};
             }
             if (capped) {
-                return {y_end[2], beam_rho(y_end, x_b, y_b), MAX_PATH_CM, swim_status::max_path};
+                if (stiff)
+                    return {y_end[2], beam_rho(y_end, x_b, y_b), max_path, swim_status::max_path};
+                break;
             }
             g_prev = g_cur;
         }
@@ -98,6 +122,7 @@ auto swim_back_to_beamline(const magnetic_field& field, const std::array<double,
         return fail();
     }
 
+    if (std::isfinite(best_rho)) return {best_z, best_rho, best_s, swim_status::converged};
     return {y_end[2], beam_rho(y_end, x_b, y_b), stepper.current_time(), swim_status::max_path};
 }
 
