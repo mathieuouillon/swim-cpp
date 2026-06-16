@@ -12,6 +12,8 @@ Figures:
 Usage:
   python plot_vz_bins.py [vz_bins.root] [--suffix _tag]
 """
+import re
+
 import uproot
 import numpy as np
 import matplotlib as mpl
@@ -76,8 +78,33 @@ NROW, NCOL = 2, 5                        # theta panels per page
 TH_COLORS = [plt.cm.tab10(i % 10) for i in range(len(TH_BINS))]
 
 
-def _key(prefix: str, p_lo: int, p_hi: int, t_lo: int, t_hi: int) -> str:
-    return f"{prefix}_p{p_lo:02d}_{p_hi:02d}_th{t_lo:02d}_{t_hi:02d}"
+def _ptag(e: float) -> str:
+    """Momentum-edge tag matching vz-swim-hist's p_tag: integer GeV -> 2-digit
+    ('02'); fractional -> one decimal ('0.3')."""
+    r = round(e)
+    return f"{int(r):02d}" if abs(e - r) < 1e-6 else f"{e:.1f}"
+
+
+def _key(prefix: str, p_lo: float, p_hi: float, t_lo: int, t_hi: int) -> str:
+    return f"{prefix}_p{_ptag(p_lo)}_{_ptag(p_hi)}_th{int(t_lo):02d}_{int(t_hi):02d}"
+
+
+def _set_grid_from(f) -> None:
+    """Adopt the (p, theta) grid present in an open vz_bins.root so the plotter
+    follows whatever momentum binning vz-swim-hist used (pion 0.3-6 GeV vs the
+    electron 2-10). Updates the module P_BINS/TH_BINS/TH_COLORS in place."""
+    global P_BINS, TH_BINS, TH_COLORS
+    pat = re.compile(r"vz_swum_p([0-9.]+)_([0-9.]+)_th(\d+)_(\d+)")
+    ps, ths = set(), set()
+    for k in f.keys():
+        m = pat.match(k.split(";")[0])
+        if m:
+            ps.add((float(m.group(1)), float(m.group(2))))
+            ths.add((int(m.group(3)), int(m.group(4))))
+    if ps:
+        P_BINS = sorted(ps)
+        TH_BINS = sorted(ths)
+        TH_COLORS = [plt.cm.tab10(i % 10) for i in range(len(TH_BINS))]
 
 
 def _mean_rms(vals: np.ndarray, edges: np.ndarray) -> tuple[float, float]:
@@ -131,6 +158,7 @@ def plot_theta_overlay(file_path: str = "vz_bins.root", out_path: str = "vz_thet
     swum vz (identical layout/colors/axes for flip-comparison). `tag` is an
     extra label appended to the legend title (e.g. the solenoid z-shift)."""
     with uproot.open(file_path) as f, PdfPages(out_path) as pdf:
+        _set_grid_from(f)
         for prefix, label in (("vz_rec", "reconstructed"), ("vz_swum", "swum (DC)")):
             fig = _theta_overlay_page(f, prefix, label, tag)
             pdf.savefig(fig, bbox_inches="tight")
@@ -141,6 +169,7 @@ def plot_theta_overlay(file_path: str = "vz_bins.root", out_path: str = "vz_thet
 def plot_rec_swum(file_path: str = "vz_bins.root", out_path: str = "vz_rec_swum.pdf"):
     """One page per p-bin: 2x5 theta panels overlaying rec vz and swum vz."""
     with uproot.open(file_path) as f, PdfPages(out_path) as pdf:
+        _set_grid_from(f)
         for p_lo, p_hi in P_BINS:
             fig, axs = plt.subplots(NROW, NCOL, figsize=(4.0 * NCOL, 3.4 * NROW),
                                     squeeze=False, sharex=True)
@@ -176,6 +205,7 @@ def plot_rec_swum(file_path: str = "vz_bins.root", out_path: str = "vz_rec_swum.
 def plot_dvz(file_path: str = "vz_bins.root", out_path: str = "vz_dvz.pdf"):
     """One page per p-bin: 2x5 theta panels of dvz = vz(swum) - vz(rec)."""
     with uproot.open(file_path) as f, PdfPages(out_path) as pdf:
+        _set_grid_from(f)
         for p_lo, p_hi in P_BINS:
             fig, axs = plt.subplots(NROW, NCOL, figsize=(4.0 * NCOL, 3.4 * NROW),
                                     squeeze=False, sharex=True)
@@ -211,6 +241,7 @@ def plot_summary(file_path: str = "vz_bins.root", out_path: str = "vz_summary.pd
     colors = plt.cm.viridis(np.linspace(0.0, 0.85, len(P_BINS)))
     fig, ax = plt.subplots(figsize=(8, 5.5))
     with uproot.open(file_path) as f:
+        _set_grid_from(f)
         for (p_lo, p_hi), color in zip(P_BINS, colors):
             means = np.full(len(TH_BINS), np.nan)
             rms = np.full(len(TH_BINS), np.nan)

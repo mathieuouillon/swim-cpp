@@ -112,10 +112,19 @@ def _kill_children():
 
 # ── Layout of the vz-swim-hist output (keep in sync with src/vz_swim_hist.cpp
 # and plot_vz_bins.py) ───────────────────────────────────────────────────────
-P_EDGES = np.arange(2, 10 + 1, 1)        # 2,3,...,10 GeV -> 8 bins
-TH_EDGES = np.arange(6, 26 + 1, 2)       # 6..26 deg      -> 10 bins
+P_EDGES = np.arange(2, 10 + 1, 1)        # electron default: 2,3,...,10 GeV -> 8 bins
+TH_EDGES = np.arange(6, 26 + 1, 2)       # 6..26 deg (all species)          -> 10 bins
 P_BINS = list(zip(P_EDGES[:-1], P_EDGES[1:]))
 TH_BINS = list(zip(TH_EDGES[:-1], TH_EDGES[1:]))
+
+
+def momentum_edges(pid: int):
+    """Momentum bin edges for the species (MUST match vz-swim-hist make_grid):
+    pions (|pid| == 211) get the soft [0.3, 1, 2, 3, 4, 5, 6] grid; everything
+    else keeps the electron [2 .. 10] grid. main() applies it to P_EDGES/P_BINS."""
+    if abs(pid) == 211:
+        return np.array([0.3, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    return np.arange(2, 10 + 1, 1).astype(float)
 
 # The two RG-D target peaks in the swum-vz distribution: search window per peak
 # (cm). The histogram axis is [-13, 0].
@@ -144,8 +153,15 @@ PARAMS = {
 }
 
 
-def _key(prefix: str, p_lo: int, p_hi: int, t_lo: int, t_hi: int) -> str:
-    return f"{prefix}_p{p_lo:02d}_{p_hi:02d}_th{t_lo:02d}_{t_hi:02d}"
+def _ptag(e: float) -> str:
+    """Momentum-edge tag matching vz-swim-hist's p_tag: integer GeV -> 2-digit
+    ('02'); fractional -> one decimal ('0.3')."""
+    r = round(e)
+    return f"{int(r):02d}" if abs(e - r) < 1e-6 else f"{e:.1f}"
+
+
+def _key(prefix: str, p_lo: float, p_hi: float, t_lo: int, t_hi: int) -> str:
+    return f"{prefix}_p{_ptag(p_lo)}_{_ptag(p_hi)}_th{int(t_lo):02d}_{int(t_hi):02d}"
 
 
 # ── Job running ──────────────────────────────────────────────────────────────
@@ -794,6 +810,12 @@ def main():
     p.add_argument("--plot-only", action="store_true",
                    help="skip the runs, only rebuild the summary from existing outputs")
     args = p.parse_args()
+
+    # Adopt the species-dependent (p, theta) grid (pions use a softer momentum
+    # grid than electrons; in sync with vz-swim-hist make_grid).
+    global P_EDGES, P_BINS
+    P_EDGES = momentum_edges(args.pid)
+    P_BINS = list(zip(P_EDGES[:-1], P_EDGES[1:]))
 
     if args.shifts:
         vals = sorted(set(args.shifts))
