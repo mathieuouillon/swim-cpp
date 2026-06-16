@@ -11,16 +11,8 @@ namespace vz {
 namespace odeint = boost::numeric::odeint;
 
 namespace {
-// A stiff (high-p) track meets the beamline at its FIRST closest approach -- the
-// long-validated electron behavior, capped at STIFF_MAX_PATH. A curly low-p pion
-// spirals, with closest-approach minima far out (> 1 m) before the vertex, so
-// below STIFF_P_GEV we keep swimming (out to CURLY_MAX_PATH) and take the
-// approach NEAREST the beamline, stopping once within VERTEX_RHO of it. Electrons
-// are only swum at p >= 2 GeV (their grid floor), so their results are unchanged.
-constexpr double STIFF_P_GEV = 2.0;
-constexpr double STIFF_MAX_PATH_CM = 800.0;
-constexpr double CURLY_MAX_PATH_CM = 3000.0;
-constexpr double VERTEX_RHO_CM = 3.0;
+constexpr double MAX_PATH_CM = 900.0;   // coatjava Swim _maxPathLength = 9 m
+constexpr double TARGET_Z_CM = 200.0;   // closest approach only inside z < 2 m
 constexpr double RTOL = 1e-6;
 constexpr double ATOL = 1e-6;
 using state_type = std::array<double, 6>;
@@ -30,8 +22,9 @@ auto fail() -> swim_result {
     return {nan, nan, 0.0, swim_status::no_minimum};
 }
 
-// Radial velocity (x-x_b)*ux + (y-y_b)*uy w.r.t. the beam axis at (x_b, y_b);
-// zero at the closest approach to that line.
+// Radial velocity (x-x_b)*ux + (y-y_b)*uy w.r.t. the beam axis at (x_b, y_b):
+// negative while the swim approaches the axis, zero at an extremum of the
+// distance, positive while receding.
 inline auto radial_vel(const state_type& y, double x_b, double y_b) -> double {
     return (y[0] - x_b) * y[3] + (y[1] - y_b) * y[4];
 }
@@ -48,6 +41,10 @@ auto swim_back_to_beamline(const magnetic_field& field, const std::array<double,
     const double p = std::sqrt(mom_gev[0] * mom_gev[0] + mom_gev[1] * mom_gev[1] +
                                mom_gev[2] * mom_gev[2]);
     if (!(p > 1e-6)) return fail();
+    // Backward swim: the momentum is reversed below (u = -p_hat). The caller
+    // chooses the charge sign and field polarity that retrace the incoming path
+    // -- vz-swim-hist passes the REVERSED charge with the physical (RUN::config /
+    // cnuphys) field polarity, as coatjava's SwimToBeamLine does.
     const double kq = K0 * q / p;
 
     // dy/ds = [u, kq*(u x B)], B in kG from the field map (lab Cartesian).
@@ -68,26 +65,35 @@ auto swim_back_to_beamline(const magnetic_field& field, const std::array<double,
         odeint::make_dense_output(ATOL, RTOL, odeint::runge_kutta_dopri5<state_type>());
     stepper.initialize(y, 0.0, 0.1);
 
-    const bool stiff = (p >= STIFF_P_GEV);
-    const double max_path = stiff ? STIFF_MAX_PATH_CM : CURLY_MAX_PATH_CM;
-
     double g_prev = radial_vel(y, x_b, y_b);
     state_type y_end{};
-    double best_rho = std::numeric_limits<double>::infinity();  // nearest approach (curly search)
-    double best_z = 0.0, best_s = 0.0;
 
     try {
-        while (stepper.current_time() < max_path) {
+        while (stepper.current_time() < MAX_PATH_CM) {
             const double t0 = stepper.current_time();
             stepper.do_step(system);  // one accepted adaptive step
             const double t1 = stepper.current_time();
 
-            const bool capped = (t1 >= max_path);
-            const double t_end = capped ? max_path : t1;
+            // Clamp evaluation to the 800 cm cap (the dense interpolant is valid
+            // across the just-accepted [t0, t1]).
+            const bool capped = (t1 >= MAX_PATH_CM);
+            const double t_end = capped ? MAX_PATH_CM : t1;
             stepper.calc_state(t_end, y_end);
             const double g_cur = radial_vel(y_end, x_b, y_b);
 
-            if ((g_prev < 0.0) != (g_cur < 0.0)) {  // a rho extremum (closest/farthest approach)
+            // Stop at the first MINIMUM of the beam distance -- radial velocity
+            // crossing from approaching (-) to receding (+) -- taken only once
+            // inside the target region z < 2 m. A curly low-p track leaves the
+            // DC moving tangentially, so it can start by receding (g > 0):
+            // stopping at any sign change would latch onto a leading MAXIMUM far
+            // from the beamline, and an early spiral minimum can sit at large z
+            // (coatjava's BeamLineSwimStopper guards this with the same z < 2 m
+            // window -- "avoid inbending stopping when P dir changes"). Waiting
+            // for the in-target minimum recovers the vertex for low-p pions
+            // (0.3-1 GeV: ~41% of any-sign-change -> ~100% of tracks land within
+            // 1 cm of the MC vertex) while a stiff forward track, whose radial
+            // velocity already starts negative near z = 0, is unchanged.
+            if (g_prev < 0.0 && g_cur >= 0.0) {
                 auto G = [&stepper, x_b, y_b](double t) {
                     state_type s;
                     stepper.calc_state(t, s);
@@ -99,22 +105,11 @@ auto swim_back_to_beamline(const magnetic_field& field, const std::array<double,
                 const double s_star = 0.5 * (br.first + br.second);
                 state_type ys;
                 stepper.calc_state(s_star, ys);
-                const double rho = beam_rho(ys, x_b, y_b);
-                // Stiff track: the first closest approach IS the vertex -- return it
-                // exactly as before (electrons unchanged). Curly track: keep the
-                // nearest approach and keep swimming until genuinely at the beamline.
-                if (stiff) return {ys[2], rho, s_star, swim_status::converged};
-                if (rho < best_rho) {
-                    best_rho = rho;
-                    best_z = ys[2];
-                    best_s = s_star;
-                }
-                if (rho < VERTEX_RHO_CM) return {best_z, best_rho, best_s, swim_status::converged};
+                if (ys[2] < TARGET_Z_CM)
+                    return {ys[2], beam_rho(ys, x_b, y_b), s_star, swim_status::converged};
             }
             if (capped) {
-                if (stiff)
-                    return {y_end[2], beam_rho(y_end, x_b, y_b), max_path, swim_status::max_path};
-                break;
+                return {y_end[2], beam_rho(y_end, x_b, y_b), MAX_PATH_CM, swim_status::max_path};
             }
             g_prev = g_cur;
         }
@@ -122,7 +117,6 @@ auto swim_back_to_beamline(const magnetic_field& field, const std::array<double,
         return fail();
     }
 
-    if (std::isfinite(best_rho)) return {best_z, best_rho, best_s, swim_status::converged};
     return {y_end[2], beam_rho(y_end, x_b, y_b), stepper.current_time(), swim_status::max_path};
 }
 

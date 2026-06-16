@@ -68,7 +68,7 @@ scans=(
   "torus-x      -0.5    0.5     0.05"
   "torus-y      -0.5    0.5     0.05"
   "torus-z      -2      2       0.2"
-  "torus-scale  -1.005  -0.995  0.001"   # fine scan around nominal -1.0 (11 runs); widen if needed
+  "torus-scale  0.995   1.005   0.001"   # fine scan around physical nominal +1.0 (11 runs); widen if needed
 )
 
 mode_msg="input: ${INPUT}"

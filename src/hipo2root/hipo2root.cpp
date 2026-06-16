@@ -142,10 +142,10 @@ auto print_run_config(const std::string& file) -> void {
             const double solenoid = c.get<double>("solenoid", 0);
             fmt::print("RUN::config: run {}, torus scale {}, solenoid scale {}\n",
                        c.get<int>("run", 0), torus, solenoid);
-            // Our field_map orientation is opposite to cnuphys's for both
-            // magnets (see docs/coatjava_vz.md), so the vz-swim-hist flags are:
-            fmt::print("  -> vz-swim-hist: --torus-scale {} --solenoid-scale {}\n", -torus,
-                       -solenoid);
+            // vz-swim-hist swims in the physical (cnuphys / RUN::config) polarity
+            // and reverses the charge, so the scales pass straight through:
+            fmt::print("  -> vz-swim-hist: --torus-scale {} --solenoid-scale {}\n", torus,
+                       solenoid);
             return;
         }
     }
@@ -311,9 +311,10 @@ struct particle_dumper {
     }
 };
 
-// Read RUN::config (run number + field scales, negated into our convention) and,
-// when a CCDB snapshot is given, the beam offset + solenoid z-shift for that run.
-// Packaged for saving into the output file; vz-swim-hist reads it back.
+// Read RUN::config (run number + field scales, in their physical RUN::config
+// polarity) and, when a CCDB snapshot is given, the beam offset + solenoid
+// z-shift for that run. Packaged for saving into the output file; vz-swim-hist
+// reads it back and swims with the charge reversed to match this polarity.
 auto compute_run_meta(const std::string& src_file, const std::string& ccdb_path,
                       const std::string& variation) -> vz::run_meta {
     vz::run_meta m;
@@ -327,8 +328,8 @@ auto compute_run_meta(const std::string& src_file, const std::string& ccdb_path,
                 hipo::bank_view c = ev->get(*cfg);
                 if (c.rows() > 0) {
                     m.run = c.get<int>("run", 0);
-                    m.torus_scale = -c.get<double>("torus", 0);
-                    m.solenoid_scale = -c.get<double>("solenoid", 0);
+                    m.torus_scale = c.get<double>("torus", 0);
+                    m.solenoid_scale = c.get<double>("solenoid", 0);
                     break;
                 }
             }

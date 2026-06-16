@@ -25,13 +25,16 @@ struct swim_result {
     swim_status status;
 };
 
-/// Swim a charged track BACKWARD from its DC state to the beamline: the
+/// Swim a charged track BACKWARD from its DC state to the beamline: the first
 /// closest approach to the line x=x_b, y=y_b (the beam position in cm; default
 /// the z-axis — coatjava's SwimToBeamLine uses the CCDB beam offset plus the
-/// per-event raster). `pos_cm`/`mom_gev` are the position and momentum at the
-/// DC; `q` is the charge. Reversing the direction (u = -p_hat) while keeping q
-/// retraces the particle's incoming path. Returns the z at the closest
-/// approach; doca_rho is the distance to (x_b, y_b) there.
+/// per-event raster) reached inside the target region z < 2 m. `pos_cm`/
+/// `mom_gev` are the position and momentum at the DC; `q` is the swim charge.
+/// The direction is reversed here (u = -p_hat); to retrace the incoming path
+/// the CALLER passes the reversed charge together with the physical (CCDB /
+/// cnuphys) field polarity, as coatjava does (vz-swim-hist: -charge_of(pid),
+/// torus +1, solenoid -1). Returns the z at the closest approach; doca_rho is
+/// the distance to (x_b, y_b) there.
 auto swim_back_to_beamline(const magnetic_field& field, const std::array<double, 3>& pos_cm,
                            const std::array<double, 3>& mom_gev, double q,
                            double x_b = 0.0, double y_b = 0.0) -> swim_result;

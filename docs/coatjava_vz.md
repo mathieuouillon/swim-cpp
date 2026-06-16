@@ -51,24 +51,26 @@ per 2 mm of offset — strongly θ-dependent.
 - Interpolation is trilinear (`cnuphys/magfield/.../Cell3D.java:107`), same
   maps as ours.
 
-## Field-scale sign convention (empirical, run 18614)
+## Field-scale sign convention (run 18614)
 
-`RUN::config` for run 18614 reports **torus +1.0, solenoid −1.0**, but our
-`FieldMap` (scale multiplies the map values verbatim) reproduces the pass1
-reconstructed vz with **torus −1.0, solenoid +1.0**: with torus +1 every swum
-vz lands tens of cm outside the target region, and solenoid −1 visibly
-degrades the rec/swum agreement relative to +1. So our map orientation is
-opposite to cnuphys's for **both magnets**, and when configuring
-`vz-swim-hist` from a file's `RUN::config` (printed by `hipo2root
---run-config`, which performs this conversion):
+`RUN::config` for run 18614 reports **torus +1.0, solenoid −1.0**. `vz-swim-hist`
+now swims in this physical (cnuphys / `RUN::config`) polarity and **reverses the
+charge**, exactly like coatjava's `TrackCandListFinder` (see "Call chain"), so
+the `RUN::config` scales pass straight through:
 
 | RUN::config | our flag |
 |---|---|
-| torus T | `--torus-scale -T` |
-| solenoid S | `--solenoid-scale -S` |
+| torus T | `--torus-scale T` |
+| solenoid S | `--solenoid-scale S` |
 
-Established empirically on run 18614 only (one sign test per magnet);
-re-verify on a run with flipped polarities if one is available.
+(`hipo2root --run-config` prints exactly these.) Reversing *both* the charge and
+the field leaves the Lorentz force q·(u×B) invariant, so this reproduces the
+pass1 vz bit-for-bit identically to the earlier "negated maps, keep charge"
+convention it replaced — it just makes the scales match `RUN::config` / CCDB
+directly. Swimming with only one of the two reversed (e.g. keep charge + torus
++1) sends every swum vz hundreds of cm off, which is why the old code negated
+the maps. Verified against the MC-truth `vz` on run 18614: swum − true median
+≈ 0.3 cm across 0.3–6 GeV for both pions and electrons.
 
 ## Integrator parity (not the discrepancy)
 

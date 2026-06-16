@@ -32,9 +32,9 @@ Usage (on the farm, from the repo root, after hipo2root --ccdb ...):
   # only to override one. geometric (p-flat) part of the vz theta-walk -> DC:
   python scan_field.py particles.root \
       --scan-param dc-z --z-min -2 --z-max 2 --z-step 0.2
-  # 1/p (magnetic) part -> field SCALE (sweep absolute value near nominal):
+  # 1/p (magnetic) part -> field SCALE (sweep near the physical nominal +1):
   python scan_field.py particles.root \
-      --scan-param torus-scale --shifts -1.06 -1.04 -1.02 -1.00 -0.98 -0.96
+      --scan-param torus-scale --shifts 0.96 0.98 1.00 1.02 1.04 1.06
   python scan_field.py --scan-param dc-z --plot-only          # redo summary only
 """
 import argparse

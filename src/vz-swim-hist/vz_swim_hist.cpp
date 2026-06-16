@@ -137,8 +137,8 @@ struct cli_args {
     // /geometry/shifts/solenoid z value for the run (-3.0 for 18614).
     std::string torus = "Full_torus_r501_phi361_z501_31Mar2021.dat";
     std::string solenoid = "Symm_solenoid_r601_phi1_z1201_21May2019.dat";
-    double torus_scale = -1.0;
-    double solenoid_scale = 1.0;
+    double torus_scale = 1.0;     // physical (RUN::config / cnuphys) polarity;
+    double solenoid_scale = -1.0;  // the swim reverses the charge to match
     double solenoid_z_shift = -3.0;
     double solenoid_x_shift = 0.0;  // rigid solenoid-map transverse displacements [cm]
     double solenoid_y_shift = 0.0;
@@ -154,6 +154,11 @@ struct cli_args {
     double dc_x_shift = 0.0;
     double dc_y_shift = 0.0;
     double dc_z_shift = 0.0;
+    // Max swim DOCA to the beamline to accept a vertex. With the z < 2 m guard
+    // the swum vz is accurate (~0.3 cm vs MC) well past 5 cm, so the old 5 cm
+    // cut threw away ~24% of low-p pions (large transverse miss from the dc3
+    // direction precision, but accurate z). 50 cm keeps essentially all of them.
+    double max_doca = 50.0;
 };
 
 // Build the command-line parser (external/argparse). The hidden flags
@@ -191,8 +196,8 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--solenoid")
         .default_value("Symm_solenoid_r601_phi1_z1201_21May2019.dat")
         .help("solenoid field map");
-    p.add_argument("--torus-scale").default_value(-1.0).help("torus field scale");
-    p.add_argument("--solenoid-scale").default_value(1.0).help("solenoid field scale");
+    p.add_argument("--torus-scale").default_value(1.0).help("torus field scale (physical polarity)");
+    p.add_argument("--solenoid-scale").default_value(-1.0).help("solenoid field scale (physical polarity)");
     p.add_argument("--solenoid-z-shift").default_value(-3.0).help("solenoid map z-shift [cm]");
     p.add_argument("--solenoid-x-shift").default_value(0.0).help("solenoid map x-shift [cm]");
     p.add_argument("--solenoid-y-shift").default_value(0.0).help("solenoid map y-shift [cm]");
@@ -202,6 +207,8 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--dc-x-shift").default_value(0.0).help("DC start-state x-shift [cm]");
     p.add_argument("--dc-y-shift").default_value(0.0).help("DC start-state y-shift [cm]");
     p.add_argument("--dc-z-shift").default_value(0.0).help("DC start-state z-shift [cm]");
+    p.add_argument("--max-doca").default_value(50.0).help(
+        "max swim DOCA to the beamline to accept a vertex [cm]; 5 = old tight cut");
     p.add_argument("-q", "--quiet").flag().help("suppress the progress bar");
     p.add_argument("--emit-counts").default_value("").hidden();
     p.add_argument("--entry-begin").default_value(static_cast<long long>(-1)).hidden();
@@ -239,6 +246,7 @@ auto read_args(const argparse::parser& p) -> cli_args {
     a.dc_x_shift = p.get<double>("--dc-x-shift");
     a.dc_y_shift = p.get<double>("--dc-y-shift");
     a.dc_z_shift = p.get<double>("--dc-z-shift");
+    a.max_doca = p.get<double>("--max-doca");
     return a;
 }
 
@@ -424,7 +432,10 @@ struct swim_worker {
         tree.SetBranchAddress("raster_x", &raster_x);
         tree.SetBranchAddress("raster_y", &raster_y);
 
-        const double q = charge_of(args->pid);  // swim charge for the selected species
+        // Reversed charge: with the physical (RUN::config) field polarity, the
+        // backward swim retraces the track only when BOTH momentum and charge
+        // are reversed (coatjava's TrackCandListFinder passes -Q, -p).
+        const double q = -charge_of(args->pid);
 
         constexpr Long64_t PROGRESS_CHUNK = 8192;  // amortize the atomic add
         Long64_t since_report = 0;
@@ -466,7 +477,7 @@ struct swim_worker {
             const std::array<double, 3> mom = {p * dc_cx, p * dc_cy, p * dc_cz};
             const vz::swim_result sw =
                 vz::swim_back_to_beamline(*field, pos, mom, /*q=*/q, x_b, y_b);
-            if (sw.status != vz::swim_status::converged || sw.doca_rho >= vz::SWUM_MAX_DOCA_RHO)
+            if (sw.status != vz::swim_status::converged || sw.doca_rho >= args->max_doca)
                 continue;
             ++n_swim_ok;
 
@@ -588,7 +599,8 @@ auto base_worker_argv(const std::string& exe, const cli_args& a) -> std::vector<
             "--torus-y-shift", fmt::format("{}", a.torus_y_shift),
             "--dc-x-shift", fmt::format("{}", a.dc_x_shift),
             "--dc-y-shift", fmt::format("{}", a.dc_y_shift),
-            "--dc-z-shift", fmt::format("{}", a.dc_z_shift)};
+            "--dc-z-shift", fmt::format("{}", a.dc_z_shift),
+            "--max-doca", fmt::format("{}", a.max_doca)};
 }
 
 // Probe the input tree once: validate every file and return the entry count.
