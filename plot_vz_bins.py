@@ -125,9 +125,12 @@ def _theta_overlay_page(f, prefix: str, label: str, tag: str = ""):
     """One reference-style page: one panel per p-bin (2x4 grid), all theta bins
     overlaid as normalized curves of histogram `prefix` (vz_rec or vz_swum).
     Each panel autoscales its own y axis; curves below MIN_ENTRIES are skipped."""
-    nrow, ncol = 2, 4
+    ncol = 4
+    nrow = (len(P_BINS) + ncol - 1) // ncol
     fig, axs = plt.subplots(nrow, ncol, figsize=(4.6 * ncol, 4.0 * nrow),
                             squeeze=False, sharex=True)
+    for j in range(len(P_BINS), nrow * ncol):  # hide unused panels (e.g. the pion 6-bin grid)
+        axs[j // ncol][j % ncol].set_visible(False)
     for ip, (p_lo, p_hi) in enumerate(P_BINS):
         ax = axs[ip // ncol][ip % ncol]
         for (t_lo, t_hi), color in zip(TH_BINS, TH_COLORS):
@@ -142,7 +145,7 @@ def _theta_overlay_page(f, prefix: str, label: str, tag: str = ""):
     # Shared legend above the panels: theta-bin colors.
     handles = [Line2D([], [], color=c, lw=1.6) for c in TH_COLORS]
     labels = [rf"${t_lo}^\circ \leq \theta < {t_hi}^\circ$" for t_lo, t_hi in TH_BINS]
-    title = rf"$e^-$, all sectors combined — {label}"
+    title = rf"all sectors combined — {label}"
     if tag:
         title += f" — {tag}"
     fig.legend(handles, labels, loc="upper center", ncol=5, fontsize=10,
