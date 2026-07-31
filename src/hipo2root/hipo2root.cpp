@@ -79,7 +79,8 @@ auto build_parser() -> argparse::parser {
         .help("only print each input's RUN::config (run, torus/solenoid scales) and exit");
     p.add_argument("--all-species")
         .flag()
-        .help("keep every REC::Particle row (default: only forward-detector e-/pi+/pi-)");
+        .help("keep every REC::Particle row (default: only forward-detector e-/pi+/pi- "
+              "passing the |chi2pid|<3, DC-edge, and electron PCAL fiducial cuts)");
     p.add_argument("--ccdb")
         .default_value("")
         .help("CCDB SQLite snapshot; look up beam position + solenoid shift by run and save "
@@ -100,8 +101,8 @@ auto build_parser() -> argparse::parser {
 // -> their branches are NaN / 0). RUN::config gives the run number; MC::Particle
 // + MC::RecMatch give the matched MC truth (e.g. for pions) in simulation.
 const std::vector<std::string> WANTED_BANKS = {
-    "REC::Particle", "REC::Traj",   "RASTER::position",
-    "RUN::config",   "MC::Particle", "MC::RecMatch"};
+    "REC::Particle", "REC::Traj",       "RASTER::position", "REC::Calorimeter",
+    "RUN::config",   "MC::Particle",    "MC::RecMatch"};
 
 // Keep only the wanted banks present in the first file's dictionary, so the
 // banklist construction never throws on a missing schema.
@@ -141,7 +142,9 @@ auto print_run_config(const std::string& file) -> void {
         auto ev = f.event_at(i);
         if (!ev) continue;
         hipo::bank_view c = ev->get(*cfg);
-        if (c.rows() > 0) {
+        // Skip leading scaler/run-0 events (run==0): their RUN::config carries no
+        // physics run and would send the CCDB lookup to the wrong (empty) run.
+        if (c.rows() > 0 && c.get<int>("run", 0) > 0) {
             const double torus = c.get<double>("torus", 0);
             const double solenoid = c.get<double>("solenoid", 0);
             fmt::print("RUN::config: run {}, torus scale {}, solenoid scale {}\n",
@@ -165,6 +168,7 @@ auto print_run_config(const std::string& file) -> void {
 struct particle_dumper {
     long rec_particle = -1;  // banklist index of REC::Particle
     long rec_traj = -1;      // banklist index of REC::Traj (-1 = absent)
+    long rec_calo = -1;      // banklist index of REC::Calorimeter (-1 = absent)
     long raster_pos = -1;    // banklist index of RASTER::position (-1 = absent)
     long run_config = -1;    // banklist index of RUN::config (-1 = absent)
     long mc_particle = -1;   // banklist index of MC::Particle (-1 = absent)
@@ -215,6 +219,7 @@ struct particle_dumper {
         if (rec_particle < 0) return;
         hipo::bank_view rec = bl[rec_particle];
         hipo::bank_view traj = rec_traj >= 0 ? bl[rec_traj] : hipo::bank_view{};
+        hipo::bank_view calo = rec_calo >= 0 ? bl[rec_calo] : hipo::bank_view{};
         hipo::bank_view raster = raster_pos >= 0 ? bl[raster_pos] : hipo::bank_view{};
         const int n = static_cast<int>(rec.rows());
         constexpr Float_t fnan = std::numeric_limits<Float_t>::quiet_NaN();
@@ -255,6 +260,28 @@ struct particle_dumper {
             // before the costly REC::Traj / MC-truth lookups. --all-species
             // disables this and dumps every row, as before.
             if (!keep_all && (!keep_species(pid_i) || !vz::is_forward(status_i))) continue;
+            // Quality selection (default mode only; --all-species keeps every row):
+            //  - PID timing: |chi2pid| < 3 for both electrons and pions;
+            //  - DC fiducial: REC::Traj edge distance per region (cm), all three
+            //    present and above their thresholds (R1/R2 > 5, R3 > 10);
+            //  - PCAL fiducial (electrons only): lv, lw > 9 cm.
+            if (!keep_all) {
+                const double chi2pid = rec.get<double>("chi2pid", i);
+                if (!(chi2pid > -3.0 && chi2pid < 3.0)) continue;
+
+                const auto edge1 = vz::layer_f64(traj, i, vz::DET_DC, vz::DC_LAYERS[0], "edge");
+                const auto edge2 = vz::layer_f64(traj, i, vz::DET_DC, vz::DC_LAYERS[1], "edge");
+                const auto edge3 = vz::layer_f64(traj, i, vz::DET_DC, vz::DC_LAYERS[2], "edge");
+                if (!edge1 || !edge2 || !edge3) continue;
+                if (!(*edge1 > 5.0 && *edge2 > 5.0 && *edge3 > 10.0)) continue;
+
+                if (pid_i == 11) {
+                    const auto lv = vz::layer_f64(calo, i, vz::DET_ECAL, vz::ECAL_PCAL_LAYER, "lv");
+                    const auto lw = vz::layer_f64(calo, i, vz::DET_ECAL, vz::ECAL_PCAL_LAYER, "lw");
+                    if (!lv || !lw) continue;
+                    if (!(*lv > 9.0 && *lw > 9.0)) continue;
+                }
+            }
             row r;
             r.pid = pid_i;
             r.px = static_cast<Float_t>(rec.get<double>("px", i));
@@ -343,8 +370,11 @@ auto compute_run_meta(const std::string& src_file, const std::string& ccdb_path,
                 auto ev = f.event_at(i);
                 if (!ev) continue;
                 hipo::bank_view c = ev->get(*cfg);
-                if (c.rows() > 0) {
-                    m.run = c.get<int>("run", 0);
+                // Skip leading scaler/run-0 events: run==0 poisons the CCDB
+                // lookup (beam/solenoid-shift would come back empty).
+                const int rn = c.rows() > 0 ? c.get<int>("run", 0) : 0;
+                if (rn > 0) {
+                    m.run = rn;
                     m.torus_scale = c.get<double>("torus", 0);
                     m.solenoid_scale = c.get<double>("solenoid", 0);
                     break;
@@ -427,6 +457,7 @@ auto run_dump(const cli_args& args, const std::vector<std::string>& paths, bool 
     particle_dumper dumper;
     dumper.rec_particle = bank_index("REC::Particle");
     dumper.rec_traj = bank_index("REC::Traj");
+    dumper.rec_calo = bank_index("REC::Calorimeter");
     dumper.raster_pos = bank_index("RASTER::position");
     dumper.run_config = bank_index("RUN::config");
     dumper.mc_particle = bank_index("MC::Particle");

@@ -27,6 +27,7 @@ inline constexpr int DET_FTOF = 12;
 inline constexpr int DET_HTCC = 15;
 inline constexpr std::array<int, 3> DC_LAYERS = {6, 18, 36};  // DC regions 1/2/3
 inline constexpr int FTOF_PREF_LAYER = 2;                     // FTOF panel 1B
+inline constexpr int ECAL_PCAL_LAYER = 1;                     // ECAL PCAL layer (lv/lw fiducial)
 
 // Momentum binning: 12 bins of 0.5 GeV over [0, 6) GeV.
 inline constexpr std::size_t N_MOM_BINS = 12;

@@ -177,13 +177,15 @@ def _key(prefix: str, p_lo: float, p_hi: float, t_lo: int, t_hi: int) -> str:
 # ── Job running ──────────────────────────────────────────────────────────────
 
 def vfmt(v: float) -> str:
-    """Signed value string with enough decimals to stay unique for fine steps
-    (up to 4), but identical to the old '+.2f' for 2-decimal values so existing
-    scan folders still resolve. e.g. -1.0->'-1.00', -0.999->'-0.999'."""
-    s = f"{v:+.4f}".rstrip("0")
-    intpart, _, frac = s.partition(".")
+    """Signed value string with enough decimals to stay unique for any step
+    size, but identical to the old '+.2f' for 2-decimal values so existing scan
+    folders still resolve. Trailing zeros are dropped down to a 2-decimal floor;
+    the .12f rounds away binary-float noise (0.1+0.2 -> '+0.30').
+    e.g. -1.0->'-1.00', -0.999->'-0.999', 0.12345->'+0.12345'."""
+    sign = "-" if v < 0 else "+"
+    intpart, _, frac = f"{abs(v):.12f}".rstrip("0").partition(".")
     frac = (frac + "00")[:max(2, len(frac))]
-    return f"{intpart}.{frac}"
+    return f"{sign}{intpart}.{frac}"
 
 
 def job_dir(scan_dir: Path, param: str, val: float) -> Path:
@@ -222,6 +224,12 @@ def _base_cmd(args, out: Path) -> list[str]:
                         ("--solenoid-scale", args.solenoid_scale)):
         if value is not None:
             cmd += [flag, f"{value}"]
+    # Empirical (p, theta) vz correction vz += (c0 + c1/p)*cot(theta), applied to
+    # both rec and swum by vz-swim-hist; forwarded only when non-zero so an
+    # uncorrected scan's command line is unchanged. Enables before/after scans.
+    if args.vz_cot_coeff or args.vz_cot_p_coeff:
+        cmd += ["--vz-cot-coeff", f"{args.vz_cot_coeff}",
+                "--vz-cot-p-coeff", f"{args.vz_cot_p_coeff}"]
     if args.max_entries is not None:
         cmd += ["--max-entries", str(args.max_entries)]
     return cmd
@@ -352,18 +360,24 @@ def find_peak(vals: np.ndarray, centers: np.ndarray, lo: float, hi: float):
     return float(centers[k] + 0.5 * bw * (y0 - y2) / denom)
 
 
-def _gaussian(x: np.ndarray, amp: float, mean: float, sigma: float) -> np.ndarray:
-    return amp * np.exp(-0.5 * ((x - mean) / sigma) ** 2)
+def _gauss_linear(x: np.ndarray, amp: float, mean: float, sigma: float,
+                  b0: float, b1: float) -> np.ndarray:
+    """A Gaussian peak on a local linear background. The linear term (b0 + b1*x)
+    models the falling shoulder of the neighbouring first peak under peak2, so
+    the Gaussian (amp, mean, sigma) describes peak2 alone."""
+    return amp * np.exp(-0.5 * ((x - mean) / sigma) ** 2) + b0 + b1 * x
 
 
 class Peak2Fit(NamedTuple):
-    """Top-of-peak Gaussian fit of the second swum-vz peak for one scan value.
+    """Gaussian-on-linear-background fit of the second swum-vz peak for one scan
+    value.
 
-    `mean`/`sigma` and their 1-sigma `*_err` come from scipy.optimize.curve_fit
-    (the square root of the covariance diagonal). `lo`/`hi` are the inclusive
-    bin indices of the fitted (top-of-peak) slice; `xfit`/`yfit` are the drawn
-    fit curve. `ok` is False (every value NaN/empty) for a skipped or failed
-    fit."""
+    `mean`/`sigma` (the Gaussian peak) and their 1-sigma `*_err` come from
+    scipy.optimize.curve_fit (the square root of the covariance diagonal); `amp`
+    is the Gaussian amplitude above the linear background. `lo`/`hi` are the
+    inclusive bin indices of the fitted (valley-to-valley) slice; `xfit`/`yfit`
+    are the drawn fit curve (the full peak + background model). `ok` is False
+    (every value NaN/empty) for a skipped or failed fit."""
     mean: float
     sigma: float
     mean_err: float
@@ -381,65 +395,66 @@ _FAILED_PEAK2 = Peak2Fit(np.nan, np.nan, np.nan, np.nan, np.nan, 0, 0,
 
 
 def fit_peak2_gauss(counts: np.ndarray, centers: np.ndarray, lo: float, hi: float,
-                    *, top_frac: float = 0.6, smooth_cm: float = 0.4,
-                    min_pts: int = 5) -> Peak2Fit:
-    """Gaussian fit of the TOP `top_frac` of the second swum-vz peak in [lo, hi].
+                    *, smooth_cm: float = 0.4, min_pts: int = 7) -> Peak2Fit:
+    """Gaussian-on-linear-background fit of the SECOND swum-vz peak in [lo, hi].
 
     The swum-vz spectrum has two overlapping target peaks; the second (nearest
-    vz = 0) sits on the shoulder of the first. Locate its maximum inside the
-    window on counts smoothed over `smooth_cm` (wide enough to ignore per-bin
-    noise), take the contiguous run of bins above `top_frac` x maximum around it,
-    then clip each side at the first real valley (an interior minimum of the
-    smoothed flank) so the slice can never bleed into the neighbour peak. A pure
-    Gaussian is fit (scipy.optimize.curve_fit) to that top-of-peak slice of the
-    ORIGINAL counts. With top_frac = 0.6 the threshold stays above the inter-peak
-    valley, so the slice is the peak's own near-symmetric cap and mu tracks the
-    true centre rather than being dragged onto the contaminated lower flank.
+    vz = 0) sits on the falling shoulder of the first. Locate peak2's maximum
+    inside the window on counts smoothed over `smooth_cm` (wide enough to ignore
+    per-bin noise), then take the contiguous DESCENDING run on each side of it:
+    leftward this stops at the inter-peak valley with peak1, rightward at the
+    fall to background near vz = 0. A Gaussian PLUS a linear background is fit
+    (scipy.optimize.curve_fit, Poisson-weighted) to that valley-to-valley slice
+    of the ORIGINAL counts. The linear term absorbs the residual slope of peak1's
+    shoulder, so the Gaussian mean tracks peak2's true centre instead of being
+    dragged onto the contaminated lower flank, and -- because the whole peak is
+    used rather than just its cap -- sigma is measured from the full width.
 
-    Returns a Peak2Fit with the mean and sigma and their 1-sigma errors (from the
-    covariance); `ok` is False when the window is empty, the slice is too short,
-    or the fit does not converge."""
+    Returns a Peak2Fit with the Gaussian mean and sigma and their 1-sigma errors
+    (from the covariance); `ok` is False when the window is empty, the slice is
+    too short, or the fit does not converge."""
     idx = np.flatnonzero((centers >= lo) & (centers <= hi))
     if idx.size == 0:
         return _FAILED_PEAK2
-    # Smooth over ~smooth_cm (an odd number of bins) only to choose the slice;
-    # the fit itself uses the raw counts.
+    lo_i, hi_i = int(idx[0]), int(idx[-1])
+    # Smooth over ~smooth_cm (an odd number of bins) only to locate the peak and
+    # its flanks; the fit itself uses the raw counts.
     bw = float(centers[1] - centers[0])
     ks = max(3, int(round(smooth_cm / bw)))
     ks += (ks + 1) % 2  # force odd so the moving average is centred
     smooth = np.convolve(counts, np.ones(ks) / ks, mode="same")
     imax = int(idx[np.argmax(smooth[idx])])
-    thresh = top_frac * smooth[imax]
-    if thresh <= 0:
+    if smooth[imax] <= 0:
         return _FAILED_PEAK2
-    # Contiguous run above the top-fraction threshold around the maximum...
-    klo = imax
-    while klo > 0 and smooth[klo - 1] >= thresh:
-        klo -= 1
-    khi = imax
-    while khi < len(smooth) - 1 and smooth[khi + 1] >= thresh:
-        khi += 1
-    # ...clipped at the first real valley on each side (the interior minimum of
-    # the smoothed flank); a no-op for an isolated peak, but it stops the slice
-    # from crossing a deep valley into the neighbour peak when the two overlap
-    # enough that the valley rises above the threshold.
-    klo += int(np.argmin(smooth[klo:imax + 1]))
-    khi = imax + int(np.argmin(smooth[imax:khi + 1]))
+    # Slice = the deepest smoothed valley on each side of the maximum: the
+    # inter-peak valley with peak1 on the left, the fall to background near
+    # vz = 0 on the right (the window edge when no deeper minimum is inside it).
+    # argmin over the whole flank is robust to the per-bin noise wiggles that
+    # would stop a strict descend-while-monotonic walk early.
+    klo = lo_i + int(np.argmin(smooth[lo_i:imax + 1]))
+    khi = imax + int(np.argmin(smooth[imax:hi_i + 1]))
     x, y = centers[klo:khi + 1], counts[klo:khi + 1]
     if x.size < min_pts:
         return _FAILED_PEAK2
-    # Seed amplitude/centre from the peak bin and sigma from the slice width
-    # (the slice spans ~ the FWHM, so sigma ~ width / 2.355).
-    amp0 = float(counts[imax])
-    mean0 = float(centers[imax])
     width = float(centers[khi] - centers[klo])
-    sigma0 = max(width / 2.355, 0.1)
+    # Seed: a linear background through the two valley endpoints, with the
+    # Gaussian sitting on top of it (amplitude = peak height above that line).
+    b1_0 = (float(counts[khi]) - float(counts[klo])) / width if width > 0 else 0.0
+    b0_0 = float(counts[klo]) - b1_0 * float(centers[klo])
+    amp0 = max(float(counts[imax]) - (b0_0 + b1_0 * float(centers[imax])), 1.0)
+    mean0 = float(centers[imax])
+    sigma0 = max(width / 4.0, 0.1)
+    # Poisson per-bin errors (floored at 1 so empty bins do not get infinite
+    # weight); absolute_sigma=True makes the covariance the true parameter errors.
+    sig = np.sqrt(np.maximum(y, 1.0))
     # Bound the centre to the fitted slice and sigma to its width, so a poor
-    # slice can never rail the fit out to the window/axis edges.
+    # slice can never rail the Gaussian out to the window/axis edges.
     try:
         popt, pcov = curve_fit(
-            _gaussian, x, y, p0=[amp0, mean0, sigma0],
-            bounds=([0.0, float(centers[klo]), 0.05], [np.inf, float(centers[khi]), width]),
+            _gauss_linear, x, y, p0=[amp0, mean0, sigma0, b0_0, b1_0],
+            sigma=sig, absolute_sigma=True,
+            bounds=([0.0, float(centers[klo]), 0.05, -np.inf, -np.inf],
+                    [np.inf, float(centers[khi]), width, np.inf, np.inf]),
             maxfev=10000,
         )
     except (RuntimeError, ValueError):
@@ -452,7 +467,7 @@ def fit_peak2_gauss(counts: np.ndarray, centers: np.ndarray, lo: float, hi: floa
         return _FAILED_PEAK2
     perr = np.sqrt(np.diag(pcov))  # 1-sigma parameter errors
     xf = np.linspace(float(x[0]), float(x[-1]), 200)
-    yf = _gaussian(xf, *popt)
+    yf = _gauss_linear(xf, *popt)  # full model (peak + background) for the overlay
     return Peak2Fit(float(popt[1]), sigma, float(perr[1]), float(perr[2]),
                     float(popt[0]), klo, khi, xf, yf, ok=True)
 
@@ -815,6 +830,12 @@ def main():
     p.add_argument("--solenoid-z-shift", type=float, default=None,
                    help="solenoid z-shift [cm] held fixed while scanning a torus shift "
                         "(default: from the tree's CCDB metadata)")
+    p.add_argument("--vz-cot-coeff", type=float, default=0.0,
+                   help="vz correction c0 [cm] in vz += (c0 + c1/p)*cot(theta), passed to "
+                        "vz-swim-hist (default 0 = off). Use a separate --scan-dir for the "
+                        "corrected scan so it does not overwrite the uncorrected one.")
+    p.add_argument("--vz-cot-p-coeff", type=float, default=0.0,
+                   help="vz correction c1 [cm.GeV] (1/p term) in vz += (c0 + c1/p)*cot(theta)")
     p.add_argument("--force", action="store_true",
                    help="re-run values whose vz_bins.root already exists")
     p.add_argument("--plot-only", action="store_true",
@@ -833,7 +854,7 @@ def main():
         vals = sorted(set(args.shifts))
     else:
         n = int(round((args.z_max - args.z_min) / args.z_step)) + 1
-        vals = [round(args.z_min + i * args.z_step, 4) for i in range(n)]
+        vals = [round(args.z_min + i * args.z_step, 10) for i in range(n)]
 
     if args.grid:
         run_grid(args, vals)

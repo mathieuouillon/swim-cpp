@@ -1,0 +1,8 @@
+shift,best value,RMS of peak-2 mean [cm]
+solenoid x-shift,+0.00,0.422
+solenoid y-shift,+0.00,0.422
+solenoid z-shift,+0.00,0.420
+torus x-shift,+0.05,0.378
+torus y-shift,+0.25,0.330
+torus z-shift,+0.40,0.398
+torus scale,-0.998,0.098

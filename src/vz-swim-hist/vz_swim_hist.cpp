@@ -29,7 +29,9 @@
 //
 // Usage:
 //   vz-swim-hist <input.root>... [--output FILE] [--jobs N] [--max-entries N]
-//                [--pid PID] [--dc-region 1|3] [--beam-x X] [--beam-y Y]
+//                [--pid PID] [--dc-region 1|3] [--vz-min X] [--vz-max X]
+//                [--vz-cot-coeff c0] [--vz-cot-p-coeff c1]
+//                [--beam-x X] [--beam-y Y]
 //                [--torus PATH] [--solenoid PATH]
 //                [--torus-scale X] [--solenoid-scale X]
 //                [--solenoid-z-shift X] [--solenoid-x-shift X] [--solenoid-y-shift X]
@@ -115,11 +117,14 @@ inline auto sector_index(double phi_deg) -> std::size_t {
     return static_cast<std::size_t>(a / 60.0) % N_SEC;
 }
 
-// v_z axis: the RG-D dual-target region (as in the reference electron-vz
-// figure); dvz axis from constants.
+// v_z axis: defaults to the RG-D dual-target region (as in the reference
+// electron-vz figure), but the window is configurable via --vz-min/--vz-max so
+// the rec/swum histograms can be widened past the target region -- e.g. to
+// -5..5 to show positive v_z. Set once from the CLI in main() (workers too).
+// dvz axis from constants.
 constexpr int VZ_HIST_BINS = 200;
-constexpr double VZ_HIST_MIN = -13.0;
-constexpr double VZ_HIST_MAX = 0.0;
+double VZ_HIST_MIN = -13.0;
+double VZ_HIST_MAX = 0.0;
 
 struct cli_args {
     std::vector<std::string> inputs;
@@ -174,6 +179,18 @@ struct cli_args {
     // direction precision, but accurate z). 50 cm keeps essentially all of them.
     double max_doca = 50.0;
     bool no_swim = false;  // histogram the reconstructed vz directly (no swim, no field)
+    double vz_min = -13.0;  // rec/swum histogram v_z window [cm] (default: target region)
+    double vz_max = 0.0;
+    // Empirical (p, theta) vertex correction applied to BOTH rec and swum vz:
+    //   vz -> vz + (vz_cot_coeff + vz_cot_p_coeff / p) * cot(theta)
+    // The dominant electron vz theta-walk is linear in cot(theta) (a transverse
+    // miss-distance signature, dvz = drho/tan(theta)), with a momentum-dependent
+    // coefficient a(p) = c0 + c1/p: c0 is the p-flat geometric/DC-alignment floor,
+    // c1/p the 1/p magnetic (field-scale) part. Fitted values c0~0.10 cm,
+    // c1~0.52 cm.GeV flatten both RG-D target peaks across p and theta. Default 0
+    // (no correction) -- dvz = swum - rec is unchanged since both get the same add.
+    double vz_cot_coeff = 0.0;    // c0 [cm]
+    double vz_cot_p_coeff = 0.0;  // c1 [cm.GeV]
 };
 
 // Build the command-line parser (external/argparse). The hidden flags
@@ -227,6 +244,12 @@ auto build_parser() -> argparse::parser {
     p.add_argument("--no-swim").flag().help(
         "skip the swim: histogram the reconstructed vz directly in every cell "
         "(the statistics ceiling); no field map is loaded");
+    p.add_argument("--vz-min").default_value(-13.0).help("rec/swum histogram v_z lower edge [cm]");
+    p.add_argument("--vz-max").default_value(0.0).help("rec/swum histogram v_z upper edge [cm]");
+    p.add_argument("--vz-cot-coeff").default_value(0.0).help(
+        "vz correction c0 [cm] in vz += (c0 + c1/p)*cot(theta), applied to rec and swum (0 = off)");
+    p.add_argument("--vz-cot-p-coeff").default_value(0.0).help(
+        "vz correction c1 [cm.GeV] (1/p term) in vz += (c0 + c1/p)*cot(theta)");
     p.add_argument("-q", "--quiet").flag().help("suppress the progress bar");
     p.add_argument("--emit-counts").default_value("").hidden();
     p.add_argument("--entry-begin").default_value(static_cast<long long>(-1)).hidden();
@@ -266,6 +289,10 @@ auto read_args(const argparse::parser& p) -> cli_args {
     a.dc_z_shift = p.get<double>("--dc-z-shift");
     a.max_doca = p.get<double>("--max-doca");
     a.no_swim = p.get<bool>("--no-swim");
+    a.vz_min = p.get<double>("--vz-min");
+    a.vz_max = p.get<double>("--vz-max");
+    a.vz_cot_coeff = p.get<double>("--vz-cot-coeff");
+    a.vz_cot_p_coeff = p.get<double>("--vz-cot-p-coeff");
     return a;
 }
 
@@ -477,21 +504,30 @@ struct swim_worker {
             const auto tb = static_cast<std::size_t>(tbin);
             ++n_in_grid;
 
+            // Empirical (p, theta) vertex correction, added to BOTH rec and swum
+            // vz: vz += (c0 + c1/p) * cot(theta), with cot(theta) = pz / pT. Zero
+            // when both coefficients are 0 (the default). Leaves dvz = swum - rec
+            // unchanged (both branches get the same additive shift).
+            const double pt = std::sqrt(double(px) * px + double(py) * py);
+            const double cot_theta = pt > 0.0 ? double(pz) / pt : 0.0;
+            const double vz_corr = (args->vz_cot_coeff + args->vz_cot_p_coeff / p) * cot_theta;
+            const double vzc_rec = double(vz_rec) + vz_corr;
+
             // Reference mode: histogram the reconstructed vz directly in every
             // cell -- no swim, no DC requirement -- to show the full per-cell
             // statistics ceiling. swum := rec (dvz := 0) so the usual plots work.
             if (args->no_swim) {
                 const std::size_t sec0 =
                     sector_index(std::atan2(double(py), double(px)) * vz::RAD2DEG);
-                grid.rec[pb][tb]->Fill(vz_rec);
-                grid.swum[pb][tb]->Fill(vz_rec);
+                grid.rec[pb][tb]->Fill(vzc_rec);
+                grid.swum[pb][tb]->Fill(vzc_rec);
                 grid.dvz[pb][tb]->Fill(0.0);
-                grid.sec_rec[sec0][pb][tb]->Fill(vz_rec);
-                grid.sec_swum[sec0][pb][tb]->Fill(vz_rec);
+                grid.sec_rec[sec0][pb][tb]->Fill(vzc_rec);
+                grid.sec_swum[sec0][pb][tb]->Fill(vzc_rec);
                 grid.sec_dvz[sec0][pb][tb]->Fill(0.0);
                 ++n_with_dc;
                 ++n_swim_ok;
-                sum_swum_vz += vz_rec;
+                sum_swum_vz += vzc_rec;
                 continue;
             }
 
@@ -516,18 +552,19 @@ struct swim_worker {
                 continue;
             ++n_swim_ok;
 
-            sum_swum_vz += sw.vz;
+            const double vzc_swum = sw.vz + vz_corr;
+            sum_swum_vz += vzc_swum;
 
-            grid.rec[pb][tb]->Fill(vz_rec);
-            grid.swum[pb][tb]->Fill(sw.vz);
-            grid.dvz[pb][tb]->Fill(sw.vz - vz_rec);
+            grid.rec[pb][tb]->Fill(vzc_rec);
+            grid.swum[pb][tb]->Fill(vzc_swum);
+            grid.dvz[pb][tb]->Fill(vzc_swum - vzc_rec);
 
             // Same fills, binned by sector (from the momentum azimuth).
             const double phi = std::atan2(double(py), double(px)) * vz::RAD2DEG;
             const std::size_t sec = sector_index(phi);
-            grid.sec_rec[sec][pb][tb]->Fill(vz_rec);
-            grid.sec_swum[sec][pb][tb]->Fill(sw.vz);
-            grid.sec_dvz[sec][pb][tb]->Fill(sw.vz - vz_rec);
+            grid.sec_rec[sec][pb][tb]->Fill(vzc_rec);
+            grid.sec_swum[sec][pb][tb]->Fill(vzc_swum);
+            grid.sec_dvz[sec][pb][tb]->Fill(vzc_swum - vzc_rec);
         }
         if (since_report > 0) {
             if (progress) progress->add(static_cast<std::size_t>(since_report));
@@ -639,7 +676,11 @@ auto base_worker_argv(const std::string& exe, const cli_args& a) -> std::vector<
             "--dc-x-shift", fmt::format("{}", a.dc_x_shift),
             "--dc-y-shift", fmt::format("{}", a.dc_y_shift),
             "--dc-z-shift", fmt::format("{}", a.dc_z_shift),
-            "--max-doca", fmt::format("{}", a.max_doca)};
+            "--max-doca", fmt::format("{}", a.max_doca),
+            "--vz-min", fmt::format("{}", a.vz_min),
+            "--vz-max", fmt::format("{}", a.vz_max),
+            "--vz-cot-coeff", fmt::format("{}", a.vz_cot_coeff),
+            "--vz-cot-p-coeff", fmt::format("{}", a.vz_cot_p_coeff)};
     if (a.no_swim) av.push_back("--no-swim");
     return av;
 }
@@ -844,6 +885,8 @@ auto main(int argc, char** argv) -> int {
     }
     cli_args args = read_args(p);
     GRID = make_grid(args.pid);  // species-dependent (p, theta) momentum grid
+    VZ_HIST_MIN = args.vz_min;   // rec/swum v_z window (workers re-parse the same flags)
+    VZ_HIST_MAX = args.vz_max;
     const bool worker_mode = !args.emit_counts.empty();
     // Resolve the field config from the input file's run metadata (RUN::config +
     // CCDB, written by hipo2root) for anything not set on the CLI. Workers inherit

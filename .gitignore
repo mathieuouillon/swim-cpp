@@ -45,3 +45,14 @@ dc-y_scan/
 solenoid*/
 torus*/
 zshift_scan*/
+
+# Vendored coatjava trees (3.1G + 819M) - installed, not source
+/coatjava/
+/coatjava-*/
+
+# Run outputs / scratch
+/json/
+/log/
+/bad.txt
+/flagged.txt
+/filelist.txt

@@ -103,6 +103,30 @@ executable(
   install             : true,
 )
 
+# ---- rec-vz-hist: reconstructed vz in (p,theta) bins, straight from HIPO ----
+# Reads recon .hipo directly (hipo4) and histograms EB-reconstructed vz per
+# (species, p, theta) cell for FD e-/pi+/pi- -- no particles tree, no swim, so
+# no Boost. Built to overlay two reconstruction passes cell-by-cell.
+executable(
+  'rec-vz-hist',
+  ['src/rec-vz-hist/rec_vz_hist.cpp'],
+  dependencies        : [hipo_dep, root_dep, fmt_dep, argparse_dep],
+  include_directories : common_inc,
+  install             : true,
+)
+
+# ---- hipo-check: validate / recover-read a (possibly index-less) HIPO file --
+# Forensic reader for files whose trailer index is missing (stock `hipo-utils
+# -dump` then shows 0 records). Uses the hipo4 reader's sequential-scan
+# fallback to report recoverable record/event counts, banks and a content
+# tally. No ROOT, no swim -- just hipo4 + fmt + argparse, so it builds fast.
+executable(
+  'hipo-check',
+  ['src/hipo-check/hipo_check.cpp'],
+  dependencies        : [hipo_dep, fmt_dep, argparse_dep],
+  install             : true,
+)
+
 # ---- vz-swim-hist: electron vz in (p,theta) bins with DC-R1 beamline swim --
 # Reads the flat particles.root TTree (no hipo4 library needed); its progress
 # bar is the project-local src/common/progresstracker.hpp.
